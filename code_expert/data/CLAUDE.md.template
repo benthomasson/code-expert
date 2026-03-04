@@ -1,0 +1,46 @@
+# CLAUDE.md
+
+## Domain
+
+This is a code expert knowledge base for **{{DOMAIN}}**.
+
+**Target repository:** `{{REPO_PATH}}`
+
+## Key Files
+
+| File | Purpose |
+|------|---------|
+| `entries/` | Chronological code exploration entries |
+| `beliefs.md` | Belief registry (architectural claims with source tracking) |
+| `nogoods.md` | Tracked contradictions between beliefs |
+| `.code-expert/` | Tool state (topic queue, config) |
+
+## Workflow
+
+1. Scan the repo to identify key files (`code-expert scan`)
+2. Explore topics in the queue (`code-expert explore`)
+3. Explain specific files/functions as needed (`code-expert explain file ...`)
+4. Propose beliefs from accumulated entries (`code-expert propose-beliefs`)
+5. Review and accept beliefs (`code-expert accept-beliefs`)
+6. Check for stale beliefs periodically (`beliefs check-stale`)
+
+## Tools
+
+```bash
+# Code exploration
+code-expert scan
+code-expert explore
+code-expert explain file <path>
+code-expert explain function <file:symbol>
+code-expert explain repo
+code-expert topics
+
+# Belief pipeline
+code-expert propose-beliefs
+code-expert accept-beliefs
+beliefs check-stale
+beliefs compact --budget 200
+
+# Status
+code-expert status
+```
