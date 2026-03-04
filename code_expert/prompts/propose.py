@@ -6,10 +6,17 @@ You are extracting architectural and behavioral claims from code exploration not
 These entries were written while studying a codebase. Extract factual claims that a \
 developer needs to know to work in this codebase effectively.
 
-For each significant claim, output a proposed belief in this exact format:
+For each significant claim, output a proposed belief in this exact format.
+The square brackets around ACCEPT or REJECT are REQUIRED — do not omit them:
 
-### [ACCEPT/REJECT] <belief-id-in-kebab-case>
+### [ACCEPT] <belief-id-in-kebab-case>
 <one-line factual claim>
+- Source: <path to the entry file>
+
+Or to reject:
+
+### [REJECT] <belief-id-in-kebab-case>
+<one-line reason for rejection>
 - Source: <path to the entry file>
 
 Good beliefs for codebases:

@@ -994,9 +994,9 @@ def accept_beliefs(proposals_file):
 
     text = proposals_path.read_text()
 
-    # Parse accepted beliefs
+    # Parse accepted beliefs — tolerate both ### [ACCEPT] and ### ACCEPT
     pattern = re.compile(
-        r"### \[ACCEPT\] (\S+)\n"
+        r"### \[?ACCEPT\]? (\S+)\n"
         r"(.+?)\n"
         r"- Source: (.+?)(?:\n|$)"
     )
