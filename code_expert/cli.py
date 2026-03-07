@@ -1074,6 +1074,14 @@ def accept_beliefs(proposals_file):
         click.echo("Edit the file and change [ACCEPT/REJECT] to [ACCEPT] for beliefs to keep.")
         return
 
+    click.echo(f"Found {len(matches)} accepted beliefs")
+
+    # Try batch mode first (single subprocess, single parse of beliefs.md)
+    if _accept_batch(matches):
+        return
+
+    # Fall back to per-belief add
+    click.echo("Falling back to per-belief add...")
     added = 0
     failed = 0
     for belief_id, claim_text, source in matches:
@@ -1100,6 +1108,46 @@ def accept_beliefs(proposals_file):
             sys.exit(1)
 
     click.echo(f"\nAccepted {added} beliefs ({failed} failed)")
+
+
+def _accept_batch(matches: list[tuple[str, str, str]]) -> bool:
+    """Try to add all beliefs in one subprocess via 'beliefs add-batch'.
+
+    Returns True if batch mode succeeded, False to fall back to per-belief.
+    """
+    # Build JSON lines
+    lines = []
+    for belief_id, claim_text, source in matches:
+        lines.append(json.dumps({
+            "id": belief_id,
+            "text": claim_text.strip(),
+            "source": source.strip(),
+        }))
+    json_input = "\n".join(lines)
+
+    try:
+        result = subprocess.run(
+            ["beliefs", "add-batch"],
+            input=json_input,
+            capture_output=True, text=True,
+        )
+    except FileNotFoundError:
+        click.echo("ERROR: beliefs CLI not found. Install with: uv tool install beliefs")
+        sys.exit(1)
+
+    if result.returncode != 0:
+        stderr = result.stderr.strip()
+        # add-batch not available in this version of beliefs
+        if "invalid choice" in stderr or "unrecognized arguments" in stderr:
+            return False
+        click.echo(f"Batch failed: {stderr}")
+        return False
+
+    # Print batch output
+    if result.stdout.strip():
+        click.echo(result.stdout.strip())
+
+    return True
 
 
 # --- status ---
