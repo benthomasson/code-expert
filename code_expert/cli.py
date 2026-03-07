@@ -961,48 +961,43 @@ def propose_beliefs(ctx, batch_size, output, model, entry_paths, process_all):
             click.echo("No new entries to process.")
             return
 
-    # Load existing belief IDs to tell the LLM what already exists
-    existing_ids = set()
-    beliefs_path = Path("beliefs.md")
-    if beliefs_path.exists():
-        beliefs_text = beliefs_path.read_text()
-        existing_ids = set(re.findall(r"^### ([\w-]+)", beliefs_text, re.MULTILINE))
+    # Load existing beliefs (IDs + text + source) for dedup context
+    existing_beliefs = _load_existing_beliefs(Path("beliefs.md"))
+    existing_ids = {b["id"] for b in existing_beliefs}
 
     if existing_ids:
         click.echo(f"Found {len(existing_ids)} existing beliefs (will skip duplicates)")
 
     click.echo(f"Reading {len(entries)} entries...")
 
-    # Batch entries
+    # Batch entries — track paths per batch for relevance scoring
     batches = []
+    batch_paths = []
     current_batch = []
+    current_paths = []
     for entry_path in entries:
         content = entry_path.read_text()
         if len(content) > 10000:
             content = content[:10000] + "\n[Truncated]"
         current_batch.append(f"--- FILE: {entry_path} ---\n{content}")
+        current_paths.append(str(entry_path))
         if len(current_batch) >= batch_size:
             batches.append("\n\n".join(current_batch))
+            batch_paths.append(current_paths)
             current_batch = []
+            current_paths = []
     if current_batch:
         batches.append("\n\n".join(current_batch))
+        batch_paths.append(current_paths)
 
     click.echo(f"Processing {len(batches)} batches (batch size: {batch_size})...")
-
-    # Build existing beliefs context for the prompt
-    existing_context = ""
-    if existing_ids:
-        existing_context = (
-            "\n\n## Already Accepted Beliefs\n\n"
-            "The following belief IDs already exist. Do NOT propose beliefs with these IDs "
-            "or that duplicate their meaning under different names:\n\n"
-            + "\n".join(f"- `{bid}`" for bid in sorted(existing_ids))
-            + "\n"
-        )
 
     all_proposals = []
     for i, batch_text in enumerate(batches):
         click.echo(f"  Batch {i + 1}/{len(batches)}...")
+        existing_context = _build_dedup_context(
+            existing_beliefs, batch_paths[i], batch_text,
+        )
         prompt = PROPOSE_BELIEFS_CODE.format(entries=batch_text) + existing_context
         try:
             result = invoke_sync(prompt, model=model, timeout=600)
@@ -1165,6 +1160,85 @@ def accept_beliefs(proposals_file):
             sys.exit(1)
 
     click.echo(f"\nAccepted {added} beliefs ({failed} failed)")
+
+
+def _load_existing_beliefs(beliefs_path: Path) -> list[dict]:
+    """Parse beliefs.md into list of {id, text, source} dicts."""
+    if not beliefs_path.exists():
+        return []
+    text = beliefs_path.read_text()
+    beliefs = []
+    sections = re.split(r'^(?=### )', text, flags=re.MULTILINE)
+    for section in sections:
+        m = re.match(r'^### ([\w-]+) \[(IN|OUT|STALE)\]', section)
+        if not m:
+            continue
+        lines = section.strip().splitlines()
+        claim_text = lines[1].strip() if len(lines) > 1 else ""
+        source = ""
+        for line in lines:
+            if line.startswith("- Source:"):
+                source = line.replace("- Source:", "").strip()
+        beliefs.append({"id": m.group(1), "text": claim_text, "source": source})
+    return beliefs
+
+
+def _build_dedup_context(
+    existing_beliefs: list[dict],
+    batch_entry_paths: list[str],
+    batch_text: str,
+    max_detailed: int = 50,
+    max_compact: int = 200,
+) -> str:
+    """Build per-batch dedup context: relevant beliefs with text, rest as compact IDs.
+
+    Prioritizes beliefs whose source matches batch entries, then scores
+    remaining beliefs by keyword overlap with batch content. Detailed
+    beliefs include claim text for semantic dedup; compact beliefs are
+    comma-separated IDs for exact-ID awareness.
+    """
+    if not existing_beliefs:
+        return ""
+
+    # Score each belief for relevance to this batch
+    batch_words = set(re.findall(r'[a-z]{3,}', batch_text.lower()))
+
+    scored = []
+    for belief in existing_beliefs:
+        score = 0
+        # Source match — highest priority
+        if belief["source"] and any(belief["source"] in p or p in belief["source"]
+                                     for p in batch_entry_paths):
+            score += 1000
+        # Keyword overlap with batch content
+        belief_words = set(re.findall(r'[a-z]{3,}', belief["text"].lower()))
+        belief_words |= set(belief["id"].replace("-", " ").lower().split())
+        overlap = len(batch_words & belief_words)
+        score += overlap
+        scored.append((score, belief))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # Split into detailed (with text) and compact (ID only)
+    detailed = scored[:max_detailed]
+    compact = scored[max_detailed:max_detailed + max_compact]
+
+    parts = [
+        "\n\n## Already Accepted Beliefs\n\n"
+        "The following beliefs already exist. Do NOT propose beliefs with these IDs "
+        "or that duplicate their meaning under different names.\n"
+    ]
+
+    if detailed:
+        parts.append("\nRelevant existing beliefs:")
+        for _, belief in detailed:
+            parts.append(f"- `{belief['id']}`: {belief['text']}")
+
+    if compact:
+        compact_ids = ", ".join(b["id"] for _, b in compact)
+        parts.append(f"\nOther existing IDs: {compact_ids}")
+
+    return "\n".join(parts) + "\n"
 
 
 def _accept_batch(matches: list[tuple[str, str, str]]) -> bool:
