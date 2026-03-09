@@ -12,14 +12,18 @@ from pathlib import Path
 import click
 
 from .git_utils import (
+    commits_since_checkpoint,
     extract_symbol,
     find_related_tests,
     get_commit_log,
     get_diff,
     get_diff_since,
+    get_diff_since_commit,
     get_file_content,
     get_imports,
     get_repo_structure,
+    load_diff_checkpoint,
+    save_diff_checkpoint,
 )
 from .llm import check_model_available, invoke, invoke_sync
 from .observations import parse_observation_requests, run_observations
@@ -498,11 +502,14 @@ def explain_repo(ctx, repo_path):
 @click.option("--branch", "-b", default=None, help="Branch to explain")
 @click.option("--base", default="main", help="Base branch (default: main)")
 @click.option("--since", default=None, help="Show changes since date (e.g., 2026-03-01, '1 week ago')")
+@click.option("--since-last", is_flag=True, default=False,
+              help="Show changes since last explain diff run")
 @click.pass_context
-def explain_diff(ctx, branch, base, since):
+def explain_diff(ctx, branch, base, since, since_last):
     """Explain what changed in a diff and why."""
     model = ctx.obj["model"]
     repo_path = _get_repo(ctx)
+    project_dir = _get_project_dir(ctx)
 
     if not check_model_available(model):
         click.echo(f"Error: Model '{model}' CLI not available", err=True)
@@ -511,7 +518,16 @@ def explain_diff(ctx, branch, base, since):
     abs_repo = os.path.abspath(repo_path)
 
     try:
-        if since:
+        if since_last:
+            checkpoint = load_diff_checkpoint(project_dir)
+            if not checkpoint:
+                click.echo("No previous diff checkpoint found. Use --since DATE first.", err=True)
+                sys.exit(1)
+            click.echo(f"Picking up from {checkpoint['timestamp']} ({checkpoint['head'][:8]})", err=True)
+            diff_content, commit_log = get_diff_since_commit(
+                checkpoint["head"], cwd=abs_repo,
+            )
+        elif since:
             diff_content, commit_log = get_diff_since(since, cwd=abs_repo)
         elif branch:
             diff_content = get_diff(branch, base, cwd=abs_repo)
@@ -524,7 +540,7 @@ def explain_diff(ctx, branch, base, since):
         sys.exit(1)
 
     if not diff_content.strip():
-        click.echo("No changes to explain.", err=True)
+        click.echo("No changes since last run.", err=True)
         sys.exit(0)
 
     changed_files = []
@@ -534,7 +550,12 @@ def explain_diff(ctx, branch, base, since):
             if path != "/dev/null":
                 changed_files.append(path)
 
-    diff_label = f"since {since}" if since else (branch or "staged")
+    if since_last:
+        diff_label = f"since-last ({checkpoint['head'][:8]})"
+    elif since:
+        diff_label = f"since {since}"
+    else:
+        diff_label = branch or "staged"
     click.echo(f"Explaining {diff_label} changes ({len(changed_files)} files)...", err=True)
 
     prompt = build_diff_prompt(
@@ -550,10 +571,15 @@ def explain_diff(ctx, branch, base, since):
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
-    safe_label = diff_label.replace("/", "-")
+    safe_label = diff_label.replace("/", "-").replace(" ", "-")
     _create_entry(f"diff-{safe_label}", f"Diff: {diff_label}", result)
-    _enqueue_topics(result, source=f"diff:{diff_label}", project_dir=_get_project_dir(ctx))
+    _enqueue_topics(result, source=f"diff:{diff_label}", project_dir=project_dir)
     _report_beliefs(result)
+
+    # Save checkpoint so --since-last works next time
+    if since or since_last:
+        save_diff_checkpoint(project_dir, cwd=abs_repo)
+        click.echo("Diff checkpoint saved.", err=True)
 
     _emit(ctx, result)
 
@@ -1511,6 +1537,19 @@ def status(ctx):
     done = sum(1 for t in queue if t.status == "done")
     skipped = sum(1 for t in queue if t.status == "skipped")
     click.echo(f"Topics:   {pending} pending, {done} done, {skipped} skipped")
+
+    # Diff checkpoint
+    repo_path = _get_repo(ctx)
+    unexplored = commits_since_checkpoint(_get_project_dir(ctx), cwd=repo_path)
+    if unexplored is not None:
+        checkpoint = load_diff_checkpoint(_get_project_dir(ctx))
+        ts = checkpoint["timestamp"] if checkpoint else "?"
+        if unexplored == 0:
+            click.echo(f"Diff:     up to date (last: {ts})")
+        else:
+            click.echo(f"Diff:     {unexplored} unexplored commit(s) (last: {ts})")
+    else:
+        click.echo("Diff:     no checkpoint (run: code-expert explain diff --since DATE)")
 
     # Count proposals
     proposals_path = Path("proposed-beliefs.md")

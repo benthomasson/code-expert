@@ -1,7 +1,9 @@
 """Git utilities for code explanation."""
 
+import json
 import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 
@@ -104,6 +106,74 @@ def get_diff_since(since: str, cwd: str | None = None, context_lines: int = 10) 
     log = log_result.stdout if log_result.returncode == 0 else ""
 
     return diff, log
+
+
+def save_diff_checkpoint(project_dir: str, cwd: str | None = None) -> None:
+    """Record the current HEAD as the last-explored commit."""
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True, text=True, cwd=cwd,
+    )
+    if result.returncode != 0:
+        return
+    head_sha = result.stdout.strip()
+    checkpoint = {
+        "head": head_sha,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+    }
+    os.makedirs(project_dir, exist_ok=True)
+    path = os.path.join(project_dir, "last-diff.json")
+    with open(path, "w") as f:
+        json.dump(checkpoint, f, indent=2)
+
+
+def load_diff_checkpoint(project_dir: str) -> dict | None:
+    """Load the last diff checkpoint. Returns {head, timestamp} or None."""
+    path = os.path.join(project_dir, "last-diff.json")
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, ValueError):
+        return None
+
+
+def get_diff_since_commit(base_sha: str, cwd: str | None = None, context_lines: int = 10) -> tuple[str, str]:
+    """Get diff from a specific commit to HEAD.
+
+    Returns:
+        Tuple of (diff_content, commit_log)
+    """
+    context_arg = f"-U{context_lines}"
+    diff_result = subprocess.run(
+        ["git", "diff", context_arg, f"{base_sha}..HEAD"],
+        capture_output=True, text=True, cwd=cwd,
+    )
+    if diff_result.returncode != 0:
+        raise RuntimeError(f"Git diff failed: {diff_result.stderr}")
+
+    log_result = subprocess.run(
+        ["git", "log", "--oneline", f"{base_sha}..HEAD"],
+        capture_output=True, text=True, cwd=cwd,
+    )
+    log = log_result.stdout if log_result.returncode == 0 else ""
+
+    return diff_result.stdout, log
+
+
+def commits_since_checkpoint(project_dir: str, cwd: str | None = None) -> int | None:
+    """Count commits since last diff checkpoint. Returns None if no checkpoint."""
+    checkpoint = load_diff_checkpoint(project_dir)
+    if not checkpoint:
+        return None
+    result = subprocess.run(
+        ["git", "rev-list", "--count", f"{checkpoint['head']}..HEAD"],
+        capture_output=True, text=True, cwd=cwd,
+    )
+    if result.returncode != 0:
+        return None
+    return int(result.stdout.strip())
 
 
 def get_file_content(path: str) -> str | None:
