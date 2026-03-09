@@ -1,6 +1,6 @@
 # code-expert
 
-Build expert knowledge bases from codebases. Combines repo-aware code exploration with a belief extraction pipeline.
+Build expert knowledge bases from codebases. Scans repositories, explains code through guided exploration, and distills findings into a structured belief registry.
 
 ## Install
 
@@ -8,14 +8,215 @@ Build expert knowledge bases from codebases. Combines repo-aware code exploratio
 uv tool install git+https://github.com/benthomasson/code-expert
 ```
 
+Prerequisites — these CLIs must be on your PATH:
+
+- `git`
+- [`beliefs`](https://github.com/benthomasson/beliefs) — belief registry management
+- [`entry`](https://github.com/benthomasson/entry) — chronological entry creation
+- `claude` or `gemini` — at least one LLM CLI
+
+Optional (for semantic belief deduplication):
+
+```bash
+uv pip install 'code-expert[embeddings]'
+```
+
 ## Quick Start
 
 ```bash
-code-expert init ~/git/my-project --domain "My Project"
+# 1. Point code-expert at a repo
+code-expert init ~/git/my-project --domain "Orchestration framework"
+
+# 2. Scan for interesting files and topics
 code-expert scan
-code-expert explore    # repeat until satisfied
+
+# 3. Explore topics one at a time
+code-expert explore          # next topic
+code-expert explore --pick 3 # specific topic
+code-expert explore --skip   # skip and move on
+
+# 4. Extract beliefs from your exploration entries
 code-expert propose-beliefs
-# edit proposed-beliefs.md
+# Review proposed-beliefs.md — mark entries ACCEPT or REJECT
 code-expert accept-beliefs
+
+# 5. Check progress
 code-expert status
 ```
+
+## How It Works
+
+Code-expert follows a **scan → explore → distill** workflow:
+
+```
+scan              Lightweight repo analysis → topic queue
+  │
+  ▼
+explore           Pop one topic, explain it deeply, discover new topics
+  │                 ├── file     Read + explain a source file
+  │                 ├── function Extract + explain a specific symbol
+  │                 ├── repo     Explain a directory or full repo
+  │                 ├── diff     Explain a branch or commit range
+  │                 └── general  Observe (grep, read, find) then explain
+  │
+  ▼
+propose-beliefs   Batch-extract factual claims from entries
+  │
+  ▼
+accept-beliefs    Import reviewed claims into beliefs.md
+```
+
+Each exploration creates a dated entry in `entries/` and may generate new topics, so the queue grows organically as you learn.
+
+## Commands
+
+### `code-expert init <repo-path>`
+
+Bootstrap a knowledge base. Creates `.code-expert/` config, `entries/`, `beliefs.md`, and a `CLAUDE.md` skill file.
+
+```bash
+code-expert init ~/git/agents-python --domain "AI orchestration framework"
+```
+
+### `code-expert scan`
+
+Analyze repo structure, config files, README, and entry points. Produces an overview and populates the topic queue with 8-15 starting points.
+
+```bash
+code-expert scan
+code-expert topics  # see what was queued
+```
+
+### `code-expert explain <kind> <target>`
+
+Explain a specific piece of code without going through the topic queue.
+
+```bash
+code-expert explain file src/router.py
+code-expert explain function src/router.py:route_request
+code-expert explain repo .
+code-expert explain repo src/workflows
+
+# Explain what changed on a branch
+code-expert explain diff --branch feature-auth
+
+# Explain recent changes by date
+code-expert explain diff --since 2026-03-01
+code-expert explain diff --since "1 week ago"
+
+# Pick up where you left off
+code-expert explain diff --since-last
+```
+
+Large diffs (>100K chars) automatically switch to summary mode — commit log and file list only — then queue individual files for `explore`.
+
+### `code-expert explore`
+
+Process the next topic in the queue. Each exploration reads full source, invokes the model, creates an entry, and discovers follow-up topics.
+
+```bash
+code-expert explore           # next pending topic
+code-expert explore --pick 2  # pick topic #2
+code-expert explore --skip    # skip current topic
+```
+
+For `general` topics, explore uses a three-phase process: ask the model what it needs to observe, run those observations (grep, read_file, list_directory, find_symbol, find_usages, file_imports), then explain with the gathered context.
+
+### `code-expert topics`
+
+View the exploration queue.
+
+```bash
+code-expert topics       # pending only
+code-expert topics --all # include done and skipped
+```
+
+### `code-expert propose-beliefs`
+
+Extract candidate beliefs from exploration entries. Deduplicates against existing beliefs (keyword overlap, or semantic similarity with `fastembed`).
+
+```bash
+code-expert propose-beliefs
+code-expert propose-beliefs --batch-size 10
+code-expert propose-beliefs --entry entries/2026/03/09/diff-since-last.md
+code-expert propose-beliefs --all  # re-process everything
+```
+
+Output goes to `proposed-beliefs.md`. Each proposal is marked `[ACCEPT]` or `[REJECT]` — review and flip as needed, then import.
+
+### `code-expert accept-beliefs`
+
+Import accepted proposals into `beliefs.md`.
+
+```bash
+code-expert accept-beliefs
+code-expert accept-beliefs --file my-proposals.md
+```
+
+### `code-expert status`
+
+Dashboard showing entry count, belief counts (IN/STALE), nogoods, topic queue state, diff checkpoint, and proposal progress.
+
+### `code-expert install-skill`
+
+Install the Claude Code skill file so Claude can invoke code-expert commands.
+
+```bash
+code-expert install-skill
+code-expert install-skill --skill-dir .claude/skills/code-expert
+```
+
+## Global Options
+
+| Option | Description |
+|--------|-------------|
+| `--repo`, `-r` | Repository root (default: from config or cwd) |
+| `--model`, `-m` | Model to use: `claude` or `gemini` (default: claude) |
+| `--quiet`, `-q` | Suppress explanation output to stdout |
+| `--version` | Show version |
+
+The `-r` flag lets you work across repos:
+
+```bash
+code-expert scan -r ~/git/other-project
+code-expert explore -r ~/git/other-project
+```
+
+## Project Layout
+
+After `init`, the repo gets:
+
+```
+.code-expert/
+├── config.json           # repo path, domain, created date
+├── topics.json           # exploration queue
+├── last-diff.json        # diff checkpoint for --since-last
+├── proposed-entries.json  # tracks which entries have been processed
+└── belief-vectors.json   # cached embeddings (if fastembed enabled)
+
+entries/                   # dated exploration entries
+├── 2026/03/08/
+│   ├── scan-my-project.md
+│   ├── file-router.md
+│   └── diff-since-last.md
+
+beliefs.md                # belief registry
+nogoods.md                # tracked contradictions
+proposed-beliefs.md       # proposals awaiting review
+CLAUDE.md                 # AI assistant instructions
+```
+
+## Supported Models
+
+| Name | CLI Command | Notes |
+|------|-------------|-------|
+| `claude` | `claude -p` | Default. Requires [Claude Code](https://claude.com/claude-code) |
+| `gemini` | `gemini -p ""` | Requires Gemini CLI |
+
+## Tips
+
+- **Start broad, go deep.** `scan` gives you the lay of the land. `explore` digs into specifics. Each explanation surfaces new topics.
+- **Use `--since` for ongoing tracking.** After the first `explain diff --since DATE`, subsequent runs with `--since-last` pick up automatically.
+- **Review proposals carefully.** The model proposes beliefs — you decide which are worth keeping. Flip `[REJECT]` to `[ACCEPT]` for claims you verify.
+- **Run `status` periodically.** It shows stale beliefs, unexplored commits, and pending proposals.
+- **Cross-repo exploration.** Use `-r` to point at any repo without re-initializing.
