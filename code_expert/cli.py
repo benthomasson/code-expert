@@ -711,6 +711,12 @@ def _run_file_topic(ctx, topic, model, repo_path):
     file_path = topic.target
     abs_path = os.path.join(repo_path, file_path) if not os.path.isabs(file_path) else file_path
 
+    if os.path.isdir(abs_path):
+        click.echo(f"{file_path} is a directory — exploring as repo topic.", err=True)
+        topic.kind = "repo"
+        _run_repo_topic(ctx, topic, model, repo_path)
+        return
+
     if not os.path.isfile(abs_path):
         click.echo(f"File not found: {file_path} (skipping)", err=True)
         return
