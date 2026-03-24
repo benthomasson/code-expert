@@ -5,6 +5,7 @@ from .diff import build_diff_prompt, build_diff_summary_prompt
 from .file import build_file_prompt
 from .function import build_function_prompt
 from .observe import build_observe_prompt
+from .derive import DERIVE_BELIEFS_PROMPT
 from .propose import PROPOSE_BELIEFS_CODE
 from .repo import build_repo_prompt
 from .scan import build_scan_prompt
@@ -12,6 +13,7 @@ from .spec import GENERATE_SPEC_PROMPT
 
 __all__ = [
     "BELIEFS_INSTRUCTIONS",
+    "DERIVE_BELIEFS_PROMPT",
     "GENERATE_SPEC_PROMPT",
     "PROPOSE_BELIEFS_CODE",
     "TOPICS_INSTRUCTIONS",

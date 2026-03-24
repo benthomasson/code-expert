@@ -1918,6 +1918,271 @@ def generate_spec(ctx, component, keywords, output, source_files, model, dry_run
     click.echo(f"To update: re-run this command after adding new beliefs.")
 
 
+# --- derive ---
+
+
+def _load_network() -> dict:
+    """Load network.json (exported from reasons)."""
+    network_path = Path("network.json")
+    if not network_path.exists():
+        # Try exporting from reasons
+        if _has_reasons():
+            import subprocess
+            result = subprocess.run(
+                ["reasons", "export"], capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                return json.loads(result.stdout)
+        return {"nodes": {}}
+    return json.loads(network_path.read_text())
+
+
+def _get_depth(node_id: str, nodes: dict, derived: dict, memo: dict | None = None) -> int:
+    """Compute the depth of a node in the reasoning chain."""
+    if memo is None:
+        memo = {}
+    if node_id in memo:
+        return memo[node_id]
+    if node_id not in derived:
+        memo[node_id] = 0
+        return 0
+    max_d = 0
+    for j in derived[node_id].get("justifications", []):
+        for a in j.get("antecedents", []):
+            max_d = max(max_d, _get_depth(a, nodes, derived, memo))
+    memo[node_id] = max_d + 1
+    return max_d + 1
+
+
+def _build_beliefs_section(nodes: dict, derived: dict, max_beliefs: int = 300) -> str:
+    """Build a compact beliefs section for the derive prompt."""
+    lines = []
+    in_nodes = {k: v for k, v in nodes.items()
+                if v.get("truth_value") == "IN" and k not in derived}
+    # Group by prefix
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for k, v in in_nodes.items():
+        prefix = k.split("-")[0] if "-" in k else k
+        groups[prefix].append((k, v["text"][:120]))
+
+    count = 0
+    for prefix in sorted(groups, key=lambda p: -len(groups[p])):
+        if count >= max_beliefs:
+            break
+        lines.append(f"\n### {prefix} ({len(groups[prefix])} beliefs)")
+        for belief_id, text in sorted(groups[prefix]):
+            if count >= max_beliefs:
+                break
+            lines.append(f"- `{belief_id}`: {text}")
+            count += 1
+
+    return "\n".join(lines)
+
+
+def _build_derived_section(nodes: dict, derived: dict) -> str:
+    """Build the derived conclusions section for the derive prompt."""
+    memo = {}
+    lines = []
+    for k in sorted(derived, key=lambda x: -_get_depth(x, nodes, derived, memo)):
+        depth = _get_depth(k, nodes, derived, memo)
+        text = nodes[k]["text"][:150]
+        justs = derived[k]["justifications"]
+        antes = justs[0].get("antecedents", []) if justs else []
+        outlist = justs[0].get("outlist", []) if justs else []
+        status = nodes[k].get("truth_value", "?")
+
+        lines.append(f"\n#### [{status}] depth-{depth}: `{k}`")
+        lines.append(text)
+        lines.append(f"- Antecedents: {', '.join(antes)}")
+        if outlist:
+            lines.append(f"- Unless: {', '.join(outlist)}")
+
+    return "\n".join(lines) if lines else "(No derived conclusions yet)"
+
+
+def _parse_derive_proposals(response: str) -> list[dict]:
+    """Parse DERIVE and GATE proposals from LLM response."""
+    proposals = []
+    pattern = re.compile(
+        r"### (DERIVE|GATE) (\S+)\n"
+        r"(.+?)\n"
+        r"- Antecedents: (.+?)\n"
+        r"(?:- Unless: (.+?)\n)?"
+        r"- Label: (.+?)(?:\n|$)",
+    )
+    for match in pattern.finditer(response):
+        kind = match.group(1)
+        proposal = {
+            "kind": kind.lower(),
+            "id": match.group(2),
+            "text": match.group(3).strip(),
+            "antecedents": [a.strip() for a in match.group(4).split(",")],
+            "unless": [u.strip() for u in match.group(5).split(",")] if match.group(5) else [],
+            "label": match.group(6).strip(),
+        }
+        proposals.append(proposal)
+    return proposals
+
+
+@cli.command("derive")
+@click.option("--output", "-o", default="proposed-derivations.md",
+              help="Output file (default: proposed-derivations.md)")
+@click.option("--model", "-m", default=None, help="Override model")
+@click.option("--auto", "auto_add", is_flag=True, default=False,
+              help="Automatically add proposals to reasons (no review step)")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Show what would be sent to the LLM without invoking it")
+@click.pass_context
+def derive(ctx, output, model, auto_add, dry_run):
+    """Derive deeper reasoning chains from existing beliefs.
+
+    Analyzes the belief network for opportunities to combine existing
+    conclusions into higher-level claims, and to connect positive and
+    negative chains via outlist semantics.
+
+    Example:
+        code-expert derive              # propose derivations
+        code-expert derive --auto       # propose and add automatically
+    """
+    from .caffeinate import hold as _caffeinate
+    from .prompts.derive import DERIVE_BELIEFS_PROMPT
+    _caffeinate()
+
+    if model is None:
+        model = ctx.obj["model"]
+
+    if not _has_reasons():
+        click.echo("Error: reasons CLI required. Install with: uv tool install ftl-reasons", err=True)
+        sys.exit(1)
+
+    # Load network
+    network = _load_network()
+    nodes = network.get("nodes", {})
+    if not nodes:
+        click.echo("No beliefs found. Run explorations first.", err=True)
+        sys.exit(1)
+
+    derived = {k: v for k, v in nodes.items()
+               if v.get("justifications") and len(v["justifications"]) > 0}
+    in_nodes = {k: v for k, v in nodes.items() if v.get("truth_value") == "IN"}
+    memo = {}
+    max_depth = max((_get_depth(k, nodes, derived, memo) for k in derived), default=0)
+
+    click.echo(f"Network: {len(in_nodes)} IN beliefs, {len(derived)} derived, max depth {max_depth}", err=True)
+
+    # Build prompt
+    beliefs_section = _build_beliefs_section(nodes, derived)
+    derived_section = _build_derived_section(nodes, derived)
+
+    prompt = DERIVE_BELIEFS_PROMPT.format(
+        beliefs_section=beliefs_section,
+        derived_section=derived_section,
+        total_in=len(in_nodes),
+        total_derived=len(derived),
+        max_depth=max_depth,
+    )
+
+    if dry_run:
+        click.echo(f"\n=== Prompt ({len(prompt)} chars) ===\n")
+        click.echo(prompt[:3000])
+        if len(prompt) > 3000:
+            click.echo(f"\n... ({len(prompt) - 3000} more chars)")
+        return
+
+    if not check_model_available(model):
+        click.echo(f"Error: Model '{model}' CLI not available", err=True)
+        sys.exit(1)
+
+    click.echo(f"Deriving with {model}...", err=True)
+    try:
+        result = asyncio.run(invoke(prompt, model, timeout=600))
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    # Parse proposals
+    proposals = _parse_derive_proposals(result)
+
+    if not proposals:
+        click.echo("No derivation proposals found in response.")
+        click.echo("\nRaw response:\n")
+        click.echo(result)
+        return
+
+    # Validate proposals — check antecedents exist
+    valid = []
+    for p in proposals:
+        missing = [a for a in p["antecedents"] if a not in nodes]
+        missing_unless = [u for u in p["unless"] if u not in nodes]
+        if missing or missing_unless:
+            click.echo(f"  SKIP {p['id']}: missing nodes {missing + missing_unless}", err=True)
+            continue
+        if p["id"] in nodes:
+            click.echo(f"  SKIP {p['id']}: already exists", err=True)
+            continue
+        valid.append(p)
+
+    click.echo(f"\n{len(valid)} valid proposals ({len(proposals) - len(valid)} skipped)", err=True)
+
+    if not valid:
+        return
+
+    if auto_add:
+        # Add directly to reasons
+        added = 0
+        for p in valid:
+            cmd = [
+                "reasons", "add", p["id"], p["text"],
+                "--sl", ",".join(p["antecedents"]),
+                "--label", p["label"],
+            ]
+            if p["unless"]:
+                cmd.extend(["--unless", ",".join(p["unless"])])
+
+            import subprocess
+            r = subprocess.run(cmd, capture_output=True, text=True)
+            if r.returncode == 0:
+                status = "IN" if "IN" in r.stdout else "OUT"
+                click.echo(f"  Added {p['id']} [{status}]")
+                added += 1
+            else:
+                click.echo(f"  FAIL {p['id']}: {r.stderr.strip() or r.stdout.strip()}", err=True)
+
+        if added:
+            click.echo(f"\nAdded {added} derived beliefs.", err=True)
+            _reasons_export()
+        return
+
+    # Write proposals file for review
+    output_path = Path(output)
+    with output_path.open("w") as f:
+        f.write("# Proposed Derivations\n\n")
+        f.write("Review each proposal below. To accept, run:\n\n")
+        f.write("```bash\n")
+        for p in valid:
+            sl = ",".join(p["antecedents"])
+            cmd = f'reasons add {p["id"]} "{p["text"]}" --sl {sl}'
+            if p["unless"]:
+                cmd += f' --unless {",".join(p["unless"])}'
+            cmd += f' --label "{p["label"]}"'
+            f.write(f"{cmd}\n")
+        f.write("```\n\n---\n\n")
+
+        for p in valid:
+            kind_label = "DERIVE" if p["kind"] == "derive" else "GATE (outlist)"
+            f.write(f"### {kind_label}: `{p['id']}`\n\n")
+            f.write(f"{p['text']}\n\n")
+            f.write(f"- **Antecedents**: {', '.join(f'`{a}`' for a in p['antecedents'])}\n")
+            if p["unless"]:
+                f.write(f"- **Unless**: {', '.join(f'`{u}`' for u in p['unless'])}\n")
+            f.write(f"- **Label**: {p['label']}\n\n")
+
+    click.echo(f"\nWrote {output_path} ({len(valid)} proposals)")
+    click.echo("Review, then run the commands from the file to accept.")
+    click.echo("Or re-run with --auto to add automatically.")
+
+
 # --- install-skill ---
 
 
