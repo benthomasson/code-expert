@@ -67,6 +67,9 @@ accept-beliefs    Import reviewed claims into beliefs.md / reasons.db
   │
   ▼
 derive            Combine existing beliefs into deeper reasoning chains
+  │
+  ▼
+file-issues       File issues from gated beliefs with active blockers
 ```
 
 Each exploration creates a dated entry in `entries/` and may generate new topics, so the queue grows organically as you learn.
@@ -172,6 +175,24 @@ Proposes two types of derived beliefs:
 - **GATE**: Outlist-gated — positive claim holds UNLESS a negative claim (bug, gap, fragility) is IN. When the negative claim is retracted (problem fixed), the gated conclusion automatically restores
 
 Without `--auto`, proposals are written to `proposed-derivations.md` with ready-to-run `reasons add` commands for review.
+
+### `code-expert file-issues`
+
+File GitHub or GitLab issues from gated beliefs with active blockers. Detects the platform from the target repository's git remote.
+
+```bash
+code-expert file-issues              # auto-detect repo, file issues
+code-expert file-issues --dry-run    # preview without filing
+code-expert file-issues --repo owner/repo --label bug
+code-expert file-issues --platform gitlab --repo group/project
+```
+
+For each GATE belief where the outlist node is IN (blocking the positive conclusion):
+- Checks for existing issues to avoid duplicates (fuzzy title matching)
+- Creates an issue with the blocker's description, impact (which beliefs it blocks), and resolution instructions
+- Adds the `reasons-gate` label automatically
+
+Requires `gh` (GitHub) or `glab` (GitLab) CLI to be installed and authenticated.
 
 ### `code-expert status`
 

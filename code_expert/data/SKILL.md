@@ -1,7 +1,7 @@
 ---
 name: code-expert
 description: Build expert knowledge bases from codebases — explore, explain, extract beliefs
-argument-hint: "[init|scan|explain|explore|topics|propose-beliefs|accept-beliefs|derive|status]"
+argument-hint: "[init|scan|explain|explore|topics|propose-beliefs|accept-beliefs|derive|file-issues|status]"
 allowed-tools: Bash(code-expert *), Bash(uv run code-expert *), Bash(uvx *code-expert*), Read, Grep, Glob
 ---
 
@@ -44,6 +44,7 @@ code-expert status                         # dashboard
 - `propose-beliefs` — Extract beliefs from entries
 - `accept-beliefs` — Import accepted beliefs (uses `reasons` if installed, falls back to `beliefs`)
 - `derive [--auto] [--dry-run]` — Propose deeper reasoning chains from existing beliefs (requires `reasons`)
+- `file-issues [--dry-run] [--repo OWNER/REPO] [--label L]` — File issues from gated beliefs with active blockers (GitHub/GitLab)
 - `status` — Dashboard (shows reasons.db stats if available)
 
 ## Natural Language
@@ -54,6 +55,7 @@ If the user says:
 - "explain this file" → `code-expert explain file <path>`
 - "extract what we've learned" → `code-expert propose-beliefs`
 - "build deeper chains" / "derive conclusions" → `code-expert derive`
+- "file issues for blockers" / "what's blocking features" → `code-expert file-issues --dry-run`
 - "how far along are we" → `code-expert status`
 
 ## Belief Storage

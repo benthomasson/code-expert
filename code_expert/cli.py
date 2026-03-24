@@ -2183,6 +2183,289 @@ def derive(ctx, output, model, auto_add, dry_run):
     click.echo("Or re-run with --auto to add automatically.")
 
 
+# --- file-issues ---
+
+
+def _detect_platform(repo_path: str) -> tuple[str | None, str | None]:
+    """Detect GitHub/GitLab from git remote and return (platform, owner/repo)."""
+    result = subprocess.run(
+        ["git", "config", "--get", "remote.origin.url"],
+        capture_output=True, text=True, cwd=repo_path,
+    )
+    if result.returncode != 0:
+        return None, None
+    url = result.stdout.strip()
+
+    # Parse owner/repo from URL
+    # Handles: git@github.com:owner/repo.git, https://github.com/owner/repo.git
+    m = re.match(r"(?:https?://|git@)([^/:]+)[:/](.+?)(?:\.git)?$", url)
+    if not m:
+        return None, None
+    host, path = m.group(1), m.group(2)
+
+    if "github" in host:
+        return "github", path
+    elif "gitlab" in host:
+        return "gitlab", path
+    return None, None
+
+
+def _find_existing_issues(platform: str, repo_slug: str,
+                          blocker_ids: list[str],
+                          blocker_texts: dict[str, str]) -> set[str]:
+    """Search for existing issues matching blockers. Returns matched blocker IDs.
+
+    Searches by belief ID and by key words from the blocker text to catch
+    issues filed manually with different title formats.
+    """
+    found = set()
+
+    if platform == "github":
+        # Fetch all open+closed issues once (more efficient than per-blocker queries)
+        result = subprocess.run(
+            ["gh", "issue", "list", "--repo", repo_slug,
+             "--state", "all", "--json", "title,number,state",
+             "--limit", "200"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return found
+        issues = json.loads(result.stdout)
+        titles_lower = [issue["title"].lower() for issue in issues]
+
+        for bid in blocker_ids:
+            # Check if belief ID appears in any title
+            bid_words = bid.replace("-", " ").lower()
+            for title in titles_lower:
+                if bid.lower() in title or _titles_match(bid_words, title):
+                    found.add(bid)
+                    break
+
+    elif platform == "gitlab":
+        for bid in blocker_ids:
+            # Search by first few words of the blocker text
+            search = bid.replace("-", " ")
+            result = subprocess.run(
+                ["glab", "issue", "list", "--repo", repo_slug,
+                 "--search", search, "--in", "title",
+                 "--output", "json"],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                issues = json.loads(result.stdout)
+                if issues:
+                    found.add(bid)
+
+    return found
+
+
+def _titles_match(bid_words: str, title: str) -> bool:
+    """Check if a belief ID's words substantially overlap with an issue title."""
+    # Normalize hyphens to spaces for matching
+    bid_tokens = set(bid_words.replace("-", " ").split())
+    title_tokens = set(title.replace("-", " ").split())
+    # Ignore very short common words
+    bid_tokens -= {"is", "a", "an", "the", "and", "or", "not", "no", "in", "on", "to", "for", "of"}
+    if not bid_tokens:
+        return False
+    overlap = bid_tokens & title_tokens
+    return len(overlap) >= len(bid_tokens) * 0.6
+
+
+def _build_issue_body(blocker_node: dict, gated_nodes: list[dict]) -> str:
+    """Build issue body from a blocker node and the gated nodes it blocks."""
+    lines = [
+        f"## Problem",
+        f"",
+        f"{blocker_node['text']}",
+        f"",
+        f"## Impact",
+        f"",
+        f"This blocks {len(gated_nodes)} belief(s) in the knowledge base:",
+        f"",
+    ]
+    for gated in gated_nodes:
+        lines.append(f"- **{gated['id']}**: {gated['text'][:120]}")
+    lines.extend([
+        f"",
+        f"## Resolution",
+        f"",
+        f"When this issue is resolved, retract the blocker belief to restore gated conclusions:",
+        f"```bash",
+        f"reasons retract {blocker_node['id']} --reason \"Fixed in <PR/commit>\"",
+        f"```",
+        f"",
+        f"---",
+        f"*Filed automatically from reasons network by `code-expert file-issues`*",
+    ])
+    return "\n".join(lines)
+
+
+def _create_issue(platform: str, repo_slug: str, title: str, body: str,
+                  labels: list[str]) -> str | None:
+    """Create an issue and return its URL, or None on failure."""
+    if platform == "github":
+        cmd = ["gh", "issue", "create", "--repo", repo_slug,
+               "--title", title, "--body", body]
+        for label in labels:
+            cmd.extend(["--label", label])
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return result.stdout.strip()
+        click.echo(f"  Error creating issue: {result.stderr.strip()}", err=True)
+        return None
+    elif platform == "gitlab":
+        cmd = ["glab", "issue", "create", "--repo", repo_slug,
+               "--title", title, "--description", body, "--yes"]
+        for label in labels:
+            cmd.extend(["--label", label])
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            # glab prints URL to stdout
+            url = result.stdout.strip()
+            if not url:
+                url = result.stderr.strip()
+            return url
+        click.echo(f"  Error creating issue: {result.stderr.strip()}", err=True)
+        return None
+    return None
+
+
+@cli.command("file-issues")
+@click.option("--repo", "-r", "repo_slug", default=None,
+              help="Target repo (owner/repo). Auto-detected from git remote if omitted.")
+@click.option("--platform", "-p", "platform_override", default=None,
+              type=click.Choice(["github", "gitlab"]),
+              help="Force platform (auto-detected if omitted)")
+@click.option("--label", "-l", "labels", multiple=True,
+              help="Extra labels to add (repeatable)")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Show what would be filed without creating issues")
+@click.pass_context
+def file_issues(ctx, repo_slug, platform_override, labels, dry_run):
+    """File issues from gated beliefs that have active blockers.
+
+    Finds GATE beliefs where outlist nodes are IN (blocking the conclusion),
+    and creates issues for each blocker in the target repository.
+
+    Checks for existing issues to avoid duplicates.
+
+    Example:
+        code-expert file-issues              # auto-detect repo, file issues
+        code-expert file-issues --dry-run    # preview without filing
+        code-expert file-issues --repo owner/repo --label bug
+    """
+    if not _has_reasons():
+        click.echo("Error: reasons CLI required. Install with: uv tool install ftl-reasons", err=True)
+        sys.exit(1)
+
+    # Load network
+    network = _load_network()
+    nodes = network.get("nodes", {})
+    if not nodes:
+        click.echo("No beliefs found. Run explorations first.", err=True)
+        sys.exit(1)
+
+    # Find gated nodes with active blockers
+    # blocker_id -> list of gated node dicts
+    blockers: dict[str, list[dict]] = {}
+    for nid, node in nodes.items():
+        for j in node.get("justifications", []):
+            if not j.get("outlist"):
+                continue
+            for outlist_id in j["outlist"]:
+                if outlist_id not in nodes:
+                    continue
+                if nodes[outlist_id].get("truth_value") != "IN":
+                    continue
+                # This outlist node is IN, so it's actively blocking
+                blockers.setdefault(outlist_id, []).append({
+                    "id": nid,
+                    "text": node.get("text", ""),
+                })
+
+    if not blockers:
+        click.echo("No active blockers found. All gated beliefs are satisfied.")
+        return
+
+    click.echo(f"Found {len(blockers)} active blocker(s) gating {sum(len(v) for v in blockers.values())} belief(s)", err=True)
+
+    # Detect platform
+    config = _load_config()
+    target_repo_path = config.get("repo_path", os.getcwd()) if config else os.getcwd()
+
+    platform = platform_override
+    if not repo_slug or not platform:
+        detected_platform, detected_slug = _detect_platform(target_repo_path)
+        if not platform:
+            platform = detected_platform
+        if not repo_slug:
+            repo_slug = detected_slug
+
+    if not platform or not repo_slug:
+        click.echo("Error: Could not detect platform/repo. Use --repo and --platform flags.", err=True)
+        sys.exit(1)
+
+    cli_tool = "gh" if platform == "github" else "glab"
+    if not shutil.which(cli_tool):
+        click.echo(f"Error: {cli_tool} CLI not found. Install it first.", err=True)
+        sys.exit(1)
+
+    click.echo(f"Platform: {platform}, Repo: {repo_slug}", err=True)
+
+    # Check for existing issues
+    blocker_ids = list(blockers.keys())
+    blocker_texts = {bid: nodes[bid].get("text", "") for bid in blocker_ids}
+    if not dry_run:
+        click.echo("Checking for existing issues...", err=True)
+        existing = _find_existing_issues(platform, repo_slug, blocker_ids, blocker_texts)
+        if existing:
+            click.echo(f"  {len(existing)} already have issues: {', '.join(sorted(existing))}", err=True)
+    else:
+        existing = set()
+
+    # File issues
+    all_labels = ["reasons-gate"] + list(labels)
+    filed = []
+    skipped = []
+
+    for blocker_id in sorted(blocker_ids):
+        blocker_node = nodes[blocker_id]
+        gated = blockers[blocker_id]
+        title = f"[{blocker_id}] {blocker_node.get('text', '')[:80]}"
+        body = _build_issue_body(
+            {"id": blocker_id, "text": blocker_node.get("text", "")},
+            gated,
+        )
+
+        if blocker_id in existing:
+            skipped.append(blocker_id)
+            click.echo(f"  SKIP {blocker_id} (issue already exists)")
+            continue
+
+        if dry_run:
+            click.echo(f"\n  WOULD FILE: {title}")
+            click.echo(f"  Blocks: {', '.join(g['id'] for g in gated)}")
+            click.echo(f"  Labels: {', '.join(all_labels)}")
+            continue
+
+        click.echo(f"  Filing: {blocker_id}...", err=True)
+        url = _create_issue(platform, repo_slug, title, body, all_labels)
+        if url:
+            filed.append((blocker_id, url))
+            click.echo(f"  OK {blocker_id}: {url}")
+        else:
+            click.echo(f"  FAIL {blocker_id}")
+
+    # Summary
+    if dry_run:
+        click.echo(f"\nDry run: {len(blocker_ids) - len(existing)} would be filed, {len(existing)} already exist")
+    else:
+        click.echo(f"\nFiled {len(filed)} issue(s), skipped {len(skipped)}")
+        for bid, url in filed:
+            click.echo(f"  {bid}: {url}")
+
+
 # --- install-skill ---
 
 
