@@ -63,7 +63,10 @@ explore           Pop one topic, explain it deeply, discover new topics
 propose-beliefs   Batch-extract factual claims from entries
   │
   ▼
-accept-beliefs    Import reviewed claims into beliefs.md
+accept-beliefs    Import reviewed claims into beliefs.md / reasons.db
+  │
+  ▼
+derive            Combine existing beliefs into deeper reasoning chains
 ```
 
 Each exploration creates a dated entry in `entries/` and may generate new topics, so the queue grows organically as you learn.
@@ -152,6 +155,23 @@ Import accepted proposals into `beliefs.md`.
 code-expert accept-beliefs
 code-expert accept-beliefs --file my-proposals.md
 ```
+
+### `code-expert derive`
+
+Analyze the reasons network and propose deeper reasoning chains by combining existing beliefs. Requires `reasons` (ftl-reasons) and `network.json`.
+
+```bash
+code-expert derive              # propose derivations → proposed-derivations.md
+code-expert derive --auto       # propose and add to reasons automatically
+code-expert derive --dry-run    # show the prompt without invoking the LLM
+```
+
+Proposes two types of derived beliefs:
+
+- **DERIVE**: Standard SL justification — conclusion is IN when all antecedents are IN, cascades OUT when any is retracted
+- **GATE**: Outlist-gated — positive claim holds UNLESS a negative claim (bug, gap, fragility) is IN. When the negative claim is retracted (problem fixed), the gated conclusion automatically restores
+
+Without `--auto`, proposals are written to `proposed-derivations.md` with ready-to-run `reasons add` commands for review.
 
 ### `code-expert status`
 
