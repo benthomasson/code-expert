@@ -216,12 +216,14 @@ def _find_entry_points(repo_path: str, config_content: str | None) -> list[str]:
 @click.option("--repo", "-r", type=click.Path(exists=True, file_okay=False),
               default=None, help="Repository root (default: from config or cwd)")
 @click.option("--model", "-m", default="claude", help="Model to use (default: claude)")
+@click.option("--timeout", "-t", default=300, type=int, help="LLM timeout in seconds (default: 300)")
 @click.pass_context
-def cli(ctx, quiet, repo, model):
+def cli(ctx, quiet, repo, model, timeout):
     """Build expert knowledge bases from codebases."""
     ctx.ensure_object(dict)
     ctx.obj["quiet"] = quiet
     ctx.obj["model"] = model
+    ctx.obj["timeout"] = timeout
     if repo:
         ctx.obj["repo"] = os.path.abspath(repo)
     else:
@@ -309,6 +311,7 @@ def scan(ctx):
     _caffeinate()
     repo_path = _get_repo(ctx)
     model = ctx.obj["model"]
+    timeout = ctx.obj["timeout"]
 
     if not check_model_available(model):
         click.echo(f"Error: Model '{model}' CLI not available", err=True)
@@ -330,7 +333,7 @@ def scan(ctx):
 
     click.echo(f"Running {model}...", err=True)
     try:
-        result = asyncio.run(invoke(prompt, model))
+        result = asyncio.run(invoke(prompt, model, timeout=timeout))
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -361,6 +364,7 @@ def explain(ctx):
 def explain_file(ctx, file_path):
     """Explain a file's purpose, structure, and key patterns."""
     model = ctx.obj["model"]
+    timeout = ctx.obj["timeout"]
     repo_path = _get_repo(ctx)
 
     if not check_model_available(model):
@@ -399,7 +403,7 @@ def explain_file(ctx, file_path):
 
     click.echo(f"Running {model}...", err=True)
     try:
-        result = asyncio.run(invoke(prompt, model))
+        result = asyncio.run(invoke(prompt, model, timeout=timeout))
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -418,6 +422,7 @@ def explain_file(ctx, file_path):
 def explain_function(ctx, target):
     """Explain a specific function or class. TARGET: file_path:symbol_name"""
     model = ctx.obj["model"]
+    timeout = ctx.obj["timeout"]
     repo_path = _get_repo(ctx)
 
     if ":" not in target:
@@ -458,7 +463,7 @@ def explain_function(ctx, target):
 
     click.echo(f"Running {model}...", err=True)
     try:
-        result = asyncio.run(invoke(prompt, model))
+        result = asyncio.run(invoke(prompt, model, timeout=timeout))
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -478,6 +483,7 @@ def explain_function(ctx, target):
 def explain_repo(ctx, repo_path):
     """Generate a high-level repository architecture overview."""
     model = ctx.obj["model"]
+    timeout = ctx.obj["timeout"]
 
     if repo_path == ".":
         repo_path = _get_repo(ctx)
@@ -509,7 +515,7 @@ def explain_repo(ctx, repo_path):
 
     click.echo(f"Running {model}...", err=True)
     try:
-        result = asyncio.run(invoke(prompt, model))
+        result = asyncio.run(invoke(prompt, model, timeout=timeout))
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -531,6 +537,7 @@ def explain_repo(ctx, repo_path):
 def explain_diff(ctx, branch, base, since, since_last):
     """Explain what changed in a diff and why."""
     model = ctx.obj["model"]
+    timeout = ctx.obj["timeout"]
     repo_path = _get_repo(ctx)
     project_dir = _get_project_dir(ctx)
 
@@ -601,7 +608,7 @@ def explain_diff(ctx, branch, base, since, since_last):
 
     click.echo(f"Running {model}...", err=True)
     try:
-        result = asyncio.run(invoke(prompt, model))
+        result = asyncio.run(invoke(prompt, model, timeout=timeout))
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -720,6 +727,7 @@ def explore(ctx, do_skip, pick_index):
     repo_path = _get_repo(ctx)
     abs_repo = os.path.abspath(repo_path)
     model = ctx.obj["model"]
+    timeout = ctx.obj["timeout"]
 
     for seq, (idx, topic) in enumerate(valid_topics):
         if len(valid_topics) > 1:
@@ -792,7 +800,7 @@ def _run_file_topic(ctx, topic, model, repo_path):
 
     click.echo(f"Explaining {rel_path} with {model}...", err=True)
     try:
-        result = asyncio.run(invoke(prompt, model))
+        result = asyncio.run(invoke(prompt, model, timeout=timeout))
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -842,7 +850,7 @@ def _run_function_topic(ctx, topic, model, repo_path):
 
     click.echo(f"Explaining {rel_path}:{symbol_name} with {model}...", err=True)
     try:
-        result = asyncio.run(invoke(prompt, model))
+        result = asyncio.run(invoke(prompt, model, timeout=timeout))
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -880,7 +888,7 @@ def _run_repo_topic(ctx, topic, model, repo_path):
 
     click.echo(f"Explaining repo with {model}...", err=True)
     try:
-        result = asyncio.run(invoke(prompt, model))
+        result = asyncio.run(invoke(prompt, model, timeout=timeout))
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -925,7 +933,7 @@ def _run_diff_topic(ctx, topic, model, repo_path):
 
     click.echo(f"Explaining diff {topic.target} ({len(changed_files)} files) with {model}...", err=True)
     try:
-        result = asyncio.run(invoke(prompt, model))
+        result = asyncio.run(invoke(prompt, model, timeout=timeout))
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -1008,7 +1016,7 @@ def _run_general_topic(ctx, topic, model, repo_path):
 
     click.echo(f"Explaining with {model}...", err=True)
     try:
-        result = asyncio.run(invoke(prompt, model))
+        result = asyncio.run(invoke(prompt, model, timeout=timeout))
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -1039,6 +1047,7 @@ def propose_beliefs(ctx, batch_size, output, model, entry_paths, process_all):
     _caffeinate()
     if model is None:
         model = ctx.obj["model"]
+    timeout = ctx.obj["timeout"]
 
     if not check_model_available(model):
         click.echo(f"Error: Model '{model}' CLI not available", err=True)
@@ -1121,7 +1130,7 @@ def propose_beliefs(ctx, batch_size, output, model, entry_paths, process_all):
         )
         prompt = PROPOSE_BELIEFS_CODE.format(entries=batch_text) + existing_context
         try:
-            result = invoke_sync(prompt, model=model, timeout=600)
+            result = invoke_sync(prompt, model=model, timeout=timeout)
             all_proposals.append(result)
         except Exception as e:
             click.echo(f"  ERROR: {e}")
@@ -1853,6 +1862,7 @@ def generate_spec(ctx, component, keywords, output, source_files, model, dry_run
 
     if model is None:
         model = ctx.obj["model"]
+    timeout = ctx.obj["timeout"]
     repo_path = _get_repo(ctx)
 
     # Parse keywords
@@ -1928,7 +1938,7 @@ def generate_spec(ctx, component, keywords, output, source_files, model, dry_run
 
     click.echo(f"Generating spec with {model}...", err=True)
     try:
-        result = asyncio.run(invoke(prompt, model))
+        result = asyncio.run(invoke(prompt, model, timeout=timeout))
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -2077,6 +2087,7 @@ def derive(ctx, output, model, auto_add, dry_run):
 
     if model is None:
         model = ctx.obj["model"]
+    timeout = ctx.obj["timeout"]
 
     if not _has_reasons():
         click.echo("Error: reasons CLI required. Install with: uv tool install ftl-reasons", err=True)
@@ -2122,7 +2133,7 @@ def derive(ctx, output, model, auto_add, dry_run):
 
     click.echo(f"Deriving with {model}...", err=True)
     try:
-        result = asyncio.run(invoke(prompt, model, timeout=600))
+        result = asyncio.run(invoke(prompt, model, timeout=timeout))
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)

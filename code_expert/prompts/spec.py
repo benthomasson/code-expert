@@ -62,4 +62,6 @@ or patterns. Use comments to show the relevant logic, not full code blocks.
 dependency chain briefly.
 - Keep it concise. Each belief gets 2-5 lines, not a paragraph.
 - Do not invent claims. If the beliefs don't cover something, leave it out.
+- Output the full specification document directly. Do NOT ask for permission, \
+confirmation, or approval. Do NOT say "the spec is ready" — just output it.
 """
