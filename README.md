@@ -1,6 +1,10 @@
 # code-expert
 
-Build expert knowledge bases from codebases. Scans repositories, explains code through guided exploration, and distills findings into a structured belief registry.
+Deep code analysis through belief networks. Systematically explores codebases, extracts factual beliefs, builds dependency networks, and surfaces architectural issues that code review, static analysis, and LLM chat miss individually.
+
+**What it finds:** Not just bugs in diffs, but design-level issues — dormant subsystems, security defaults that were never hardened, abstractions that leak across layers. These have no diff that introduced them. They become visible only when you build a theory of the codebase and reason over it.
+
+**How it works:** In one session on a 15k-line infrastructure framework, code-expert explored 152 topics, extracted 785 beliefs into a reason maintenance system, derived logical consequences across the belief network, and surfaced architectural issues that led to 8 merged PRs and 8 closed GitHub issues — including disabled SSH host key verification, command injection vectors, and a dormant policy engine with no tests.
 
 ## Install
 
@@ -46,7 +50,7 @@ code-expert status
 
 ## How It Works
 
-Code-expert follows a **scan → explore → distill** workflow:
+Code-expert follows a **scan → explore → distill → reason → act** pipeline:
 
 ```
 scan              Lightweight repo analysis → topic queue
@@ -66,13 +70,27 @@ propose-beliefs   Batch-extract factual claims from entries
 accept-beliefs    Import reviewed claims into beliefs.md / reasons.db
   │
   ▼
-derive            Combine existing beliefs into deeper reasoning chains
+derive            Compute logical consequences across the belief network
+  │                 ├── DERIVE   Conclusion holds when all premises hold
+  │                 └── GATE     Positive claim holds UNLESS a blocker is IN
   │
   ▼
-file-issues       File issues from gated beliefs with active blockers
+file-issues       OUT gated beliefs → GitHub/GitLab issues automatically
 ```
 
 Each exploration creates a dated entry in `entries/` and may generate new topics, so the queue grows organically as you learn.
+
+### Why this catches things code review doesn't
+
+The pipeline's power comes from five ingredients working together:
+
+1. **Exhaustive exploration** — the topic queue ensures every public function, module boundary, and configuration surface gets examined. Humans skip things.
+2. **Belief extraction** — observations become structured, queryable claims with provenance. "known_hosts=None" stops being a detail buried in a file and becomes a tracked fact.
+3. **Dependency tracking** — beliefs connect to each other. "SSH layer is production-hardened" depends on "host key verification is enabled" and "command injection is prevented."
+4. **Derivation** — the system computes logical consequences. If a premise is OUT, every conclusion that depends on it goes OUT automatically.
+5. **Contradiction detection** — OUT derived beliefs map directly to actionable issues. "SSH layer is NOT production-hardened" becomes a GitHub issue with the specific blockers listed.
+
+Remove any one of these and the process breaks down. Without exhaustive exploration, you miss premises. Without belief extraction, observations stay in prose. Without dependency tracking, you can't compute consequences. Without derivation, you see only individual facts. Without contradiction detection, you have a knowledge base but no actionable output.
 
 ## Commands
 
@@ -259,5 +277,7 @@ CLAUDE.md                 # AI assistant instructions
 - **Start broad, go deep.** `scan` gives you the lay of the land. `explore` digs into specifics. Each explanation surfaces new topics.
 - **Use `--since` for ongoing tracking.** After the first `explain diff --since DATE`, subsequent runs with `--since-last` pick up automatically.
 - **Review proposals carefully.** The model proposes beliefs — you decide which are worth keeping. Flip `[REJECT]` to `[ACCEPT]` for claims you verify.
+- **Run `derive` after accepting beliefs.** This is where architectural insights emerge — the system connects individual observations into higher-level conclusions and identifies which ones are broken.
+- **Use `file-issues` to close the loop.** OUT gated beliefs become GitHub issues with specific blockers and resolution instructions. Fix the code, retract the blocker in the RMS, and the gated belief automatically restores to IN.
 - **Run `status` periodically.** It shows stale beliefs, unexplored commits, and pending proposals.
 - **Cross-repo exploration.** Use `-r` to point at any repo without re-initializing.
