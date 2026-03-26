@@ -2,7 +2,7 @@
 name: code-expert
 description: Build expert knowledge bases from codebases — explore, explain, extract beliefs
 argument-hint: "[init|scan|explain|explore|topics|propose-beliefs|accept-beliefs|derive|file-issues|status]"
-allowed-tools: Bash(code-expert *), Bash(uv run code-expert *), Bash(uvx *code-expert*), Read, Grep, Glob
+allowed-tools: Bash(code-expert *), Bash(uv run code-expert *), Bash(uvx *ftl-code-expert*), Read, Grep, Glob
 ---
 
 # Code Expert
@@ -14,7 +14,7 @@ Build expert knowledge bases from codebases by combining code exploration with b
 Try these in order until one works:
 1. `code-expert $ARGUMENTS` (if installed via `uv tool install`)
 2. `uv run code-expert $ARGUMENTS` (if in the repo with pyproject.toml)
-3. `uvx --from git+https://github.com/benthomasson/code-expert code-expert $ARGUMENTS` (fallback)
+3. `uvx --from git+https://github.com/benthomasson/ftl-code-expert code-expert $ARGUMENTS` (fallback)
 
 ## Typical Workflow
 

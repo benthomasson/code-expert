@@ -9,7 +9,7 @@ Deep code analysis through belief networks. Systematically explores codebases, e
 ## Install
 
 ```bash
-uv tool install git+https://github.com/benthomasson/code-expert
+uv tool install git+https://github.com/benthomasson/ftl-code-expert
 ```
 
 Prerequisites — these CLIs must be on your PATH:
@@ -22,7 +22,7 @@ Prerequisites — these CLIs must be on your PATH:
 Optional (for semantic belief deduplication):
 
 ```bash
-uv pip install 'code-expert[embeddings]'
+uv pip install 'ftl-code-expert[embeddings]'
 ```
 
 ## Quick Start

@@ -210,7 +210,7 @@ def _find_entry_points(repo_path: str, config_content: str | None) -> list[str]:
 
 
 @click.group()
-@click.version_option(package_name="code-expert")
+@click.version_option(package_name="ftl-code-expert")
 @click.option("--quiet", "-q", is_flag=True, default=False,
               help="Suppress explanation output to stdout")
 @click.option("--repo", "-r", type=click.Path(exists=True, file_okay=False),
@@ -1095,7 +1095,7 @@ def propose_beliefs(ctx, batch_size, output, model, entry_paths, process_all):
         belief_vectors = _get_belief_embeddings(existing_beliefs, cache_path)
         click.echo(f"  {len(belief_vectors)} belief vectors ready")
     elif existing_beliefs:
-        click.echo("(install fastembed for semantic dedup: uv pip install 'code-expert[embeddings]')")
+        click.echo("(install fastembed for semantic dedup: uv pip install 'ftl-code-expert[embeddings]')")
 
     click.echo(f"Reading {len(entries)} entries...")
 
