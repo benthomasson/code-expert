@@ -1,7 +1,7 @@
 ---
 name: code-expert
 description: Build expert knowledge bases from codebases — explore, explain, extract beliefs
-argument-hint: "[init|scan|explain|explore|topics|propose-beliefs|accept-beliefs|derive|file-issues|status]"
+argument-hint: "[init|scan|explain|explore|walk-commits|topics|propose-beliefs|accept-beliefs|derive|file-issues|status]"
 allowed-tools: Bash(code-expert *), Bash(uv run code-expert *), Bash(uvx *ftl-code-expert*), Read, Grep, Glob
 ---
 
@@ -40,6 +40,7 @@ code-expert status                         # dashboard
 - `explain repo [path]` — Repo architecture overview entry
 - `explain diff [--branch B]` — Explain changes, create entry
 - `explore [--skip] [--pick N[,N,...]] [--loop N]` — Work through topic queue (--loop N explores up to N topics continuously)
+- `walk-commits --since DATE|--since-commit SHA|--since-last [--dry-run]` — Walk commits and explore each changed file
 - `topics [--all]` — Show exploration queue
 - `propose-beliefs` — Extract beliefs from entries
 - `accept-beliefs` — Import accepted beliefs (uses `reasons` if installed, falls back to `beliefs`)
@@ -56,6 +57,7 @@ If the user says:
 - "extract what we've learned" → `code-expert propose-beliefs`
 - "build deeper chains" / "derive conclusions" → `code-expert derive`
 - "file issues for blockers" / "what's blocking features" → `code-expert file-issues --dry-run`
+- "walk through recent commits" / "explore what changed this week" → `code-expert walk-commits --since "1 week ago"`
 - "how far along are we" → `code-expert status`
 
 ## Belief Storage

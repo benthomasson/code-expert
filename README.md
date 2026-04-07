@@ -63,6 +63,8 @@ explore           Pop one topic, explain it deeply, discover new topics
   │                 ├── diff     Explain a branch or commit range
   │                 └── general  Observe (grep, read, find) then explain
   │
+walk-commits      Walk commits since a date/SHA, explore each changed file
+  │
   ▼
 propose-beliefs   Batch-extract factual claims from entries
   │
@@ -148,6 +150,17 @@ code-expert explore --loop 5     # explore up to 5
 ```
 
 For `general` topics, explore uses a three-phase process: ask the model what it needs to observe, run those observations (grep, read_file, list_directory, find_symbol, find_usages, file_imports), then explain with the gathered context.
+
+### `code-expert walk-commits`
+
+Walk commits since a date or commit and explore each changed file individually. Creates one entry per file, with commit context. Deduplicates files across commits — each file is explored once using its latest version.
+
+```bash
+code-expert walk-commits --since 2026-03-01
+code-expert walk-commits --since-commit abc1234
+code-expert walk-commits --since-last        # from last diff checkpoint
+code-expert walk-commits --since "1 week ago" --dry-run  # preview
+```
 
 ### `code-expert topics`
 

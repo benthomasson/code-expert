@@ -23,6 +23,7 @@ from .git_utils import (
     get_file_content,
     get_imports,
     get_repo_structure,
+    list_commits_with_files,
     load_diff_checkpoint,
     save_diff_checkpoint,
 )
@@ -1087,6 +1088,122 @@ def _run_general_topic(ctx, topic, model, repo_path):
     _report_beliefs(result)
 
     _emit(ctx, result)
+
+
+# --- walk-commits ---
+
+
+@cli.command("walk-commits")
+@click.option("--since", default=None, help="Walk commits since date (e.g., 2026-03-01, '1 week ago')")
+@click.option("--since-commit", default=None, help="Walk commits since a specific commit SHA")
+@click.option("--since-last", is_flag=True, default=False,
+              help="Walk commits since last diff checkpoint")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="List commits and files without exploring")
+@click.pass_context
+def walk_commits(ctx, since, since_commit, since_last, dry_run):
+    """Walk commits since a date/commit and explore each changed file.
+
+    For each commit, reads every changed file and runs file exploration,
+    creating one entry per file with commit context.
+
+    Example:
+        code-expert walk-commits --since 2026-03-01
+        code-expert walk-commits --since-commit abc1234
+        code-expert walk-commits --since-last
+        code-expert walk-commits --since "1 week ago" --dry-run
+    """
+    from .caffeinate import hold as _caffeinate
+    _caffeinate()
+
+    repo_path = _get_repo(ctx)
+    abs_repo = os.path.abspath(repo_path)
+    project_dir = _get_project_dir(ctx)
+    model = ctx.obj["model"]
+
+    # Resolve the starting point
+    if since_last:
+        checkpoint = load_diff_checkpoint(project_dir)
+        if not checkpoint:
+            click.echo("No previous diff checkpoint found. Use --since DATE first.", err=True)
+            sys.exit(1)
+        since_commit = checkpoint["head"]
+        click.echo(f"Walking from checkpoint {since_commit[:8]}", err=True)
+    elif not since and not since_commit:
+        click.echo("Error: provide --since DATE, --since-commit SHA, or --since-last", err=True)
+        sys.exit(1)
+
+    # Get commits with their changed files
+    try:
+        commits = list_commits_with_files(
+            since=since, since_commit=since_commit, cwd=abs_repo,
+        )
+    except RuntimeError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    if not commits:
+        click.echo("No commits found.", err=True)
+        sys.exit(0)
+
+    # Deduplicate files across commits — only explore each file once,
+    # using the latest commit that touched it
+    file_to_commit: dict[str, dict] = {}
+    for commit in commits:
+        for f in commit["files"]:
+            file_to_commit[f] = commit
+
+    total_files = len(file_to_commit)
+    click.echo(
+        f"Found {len(commits)} commit(s), {total_files} unique file(s) to explore",
+        err=True,
+    )
+
+    if dry_run:
+        for commit in commits:
+            click.echo(f"\n  {commit['sha'][:8]} {commit['subject']}")
+            for f in commit["files"]:
+                marker = " " if file_to_commit[f] is commit else " (earlier version, skip)"
+                click.echo(f"    {marker} {f}")
+        click.echo(f"\nWould explore {total_files} file(s)")
+        return
+
+    if not check_model_available(model):
+        click.echo(f"Error: Model '{model}' CLI not available", err=True)
+        sys.exit(1)
+
+    # Explore each unique file
+    explored = 0
+    skipped = 0
+    from .topics import Topic
+    for file_path, commit in file_to_commit.items():
+        explored += 1
+        click.echo(f"\n{'=' * 40}", err=True)
+        click.echo(
+            f"[{explored}/{total_files}] {file_path} (from {commit['sha'][:8]})",
+            err=True,
+        )
+        click.echo(f"{'=' * 40}", err=True)
+
+        topic = Topic(
+            title=f"{commit['subject']} — {file_path}",
+            kind="file",
+            target=file_path,
+            source=f"walk-commits:{commit['sha'][:8]}",
+        )
+
+        abs_path = os.path.join(abs_repo, file_path)
+        if not os.path.isfile(abs_path):
+            click.echo(f"  File not found (deleted?): {file_path}, skipping", err=True)
+            skipped += 1
+            continue
+
+        _run_file_topic(ctx, topic, model, abs_repo)
+
+    # Save checkpoint so --since-last works next time
+    save_diff_checkpoint(project_dir, cwd=abs_repo)
+    click.echo(f"\nWalked {len(commits)} commit(s), explored {explored - skipped} file(s) ({skipped} skipped)", err=True)
+    click.echo("Diff checkpoint saved.", err=True)
 
 
 # --- propose-beliefs ---

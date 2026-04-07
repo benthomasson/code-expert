@@ -383,6 +383,52 @@ def extract_symbol(file_path: str, symbol: str) -> str | None:
     return "\n".join(result_lines)
 
 
+def list_commits_with_files(
+    since: str | None = None,
+    since_commit: str | None = None,
+    cwd: str | None = None,
+) -> list[dict]:
+    """List commits with their changed files since a date or commit.
+
+    Args:
+        since: Date string (e.g., "2026-03-01", "1 week ago")
+        since_commit: Base commit SHA to start from (exclusive)
+        cwd: Working directory
+
+    Returns:
+        List of dicts: [{sha, subject, files: [path, ...]}, ...] oldest first
+    """
+    if since_commit:
+        range_spec = f"{since_commit}..HEAD"
+        cmd = ["git", "log", "--reverse", "--format=%H %s", "--name-only", range_spec]
+    elif since:
+        cmd = ["git", "log", "--reverse", "--format=%H %s", "--name-only", f"--since={since}"]
+    else:
+        raise ValueError("Either since or since_commit must be provided")
+
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
+    if result.returncode != 0:
+        raise RuntimeError(f"Git log failed: {result.stderr}")
+
+    commits = []
+    current = None
+    for line in result.stdout.splitlines():
+        if not line:
+            continue
+        # Commit lines are 40-char hex SHA followed by space and subject
+        if len(line) > 40 and line[40] == " " and all(c in "0123456789abcdef" for c in line[:40]):
+            if current:
+                commits.append(current)
+            current = {"sha": line[:40], "subject": line[41:], "files": []}
+        elif current is not None:
+            current["files"].append(line)
+
+    if current:
+        commits.append(current)
+
+    return commits
+
+
 def find_related_tests(file_path: str, repo_path: str, symbol: str | None = None) -> list[str]:
     """
     Find test files related to a source file or symbol.
