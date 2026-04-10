@@ -2131,6 +2131,165 @@ def generate_spec(ctx, component, keywords, output, source_files, model, dry_run
     click.echo(f"To update: re-run this command after adding new beliefs.")
 
 
+# --- generate-prd ---
+
+
+def _gather_derived_beliefs() -> list[dict]:
+    """Gather all DERIVED IN beliefs from beliefs.md."""
+    beliefs_path = Path("beliefs.md")
+    if not beliefs_path.exists():
+        return []
+
+    text = beliefs_path.read_text()
+    sections = re.split(r'^(?=### )', text, flags=re.MULTILINE)
+    derived = []
+
+    for section in sections:
+        m = re.match(r'^### ([\w-]+) \[(IN|OUT)\]\s*(\w+)?', section)
+        if not m:
+            continue
+        if m.group(2) != "IN" or m.group(3) != "DERIVED":
+            continue
+
+        lines = section.strip().splitlines()
+        claim_text = lines[1].strip() if len(lines) > 1 else ""
+        depends = ""
+        for line in lines:
+            if line.startswith("- Depends on:"):
+                depends = line.replace("- Depends on:", "").strip()
+
+        derived.append({
+            "id": m.group(1),
+            "text": claim_text,
+            "depends": depends,
+        })
+
+    return derived
+
+
+def _gather_specs() -> dict[str, str]:
+    """Read all spec files from docs/specs/."""
+    specs_dir = Path("docs/specs")
+    if not specs_dir.exists():
+        return {}
+
+    specs = {}
+    for spec_file in sorted(specs_dir.glob("*.spec.md")):
+        content = spec_file.read_text()
+        # Truncate very large specs to keep prompt manageable
+        if len(content) > 30000:
+            content = content[:30000] + "\n\n[Truncated at 30000 chars]"
+        specs[spec_file.stem.replace(".spec", "")] = content
+
+    return specs
+
+
+@cli.command("generate-prd")
+@click.argument("product_name")
+@click.option("--output", "-o", default=None,
+              help="Output file (default: docs/prd/<product>.prd.md)")
+@click.option("--specs", "-s", multiple=True,
+              help="Specific spec names to include (default: all)")
+@click.option("--model", "-m", default=None, help="Override model")
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Show gathered data without generating")
+@click.pass_context
+def generate_prd(ctx, product_name, output, specs, model, dry_run):
+    """Generate a PRD from beliefs and specs.
+
+    Example:
+        code-expert generate-prd FTL2
+        code-expert generate-prd "My Product" -s policy -s gate
+    """
+    from .caffeinate import hold as _caffeinate
+    from .prompts.prd import GENERATE_PRD_PROMPT
+    _caffeinate()
+
+    if model is None:
+        model = ctx.obj["model"]
+    timeout = ctx.obj["timeout"]
+
+    # Gather derived beliefs
+    derived = _gather_derived_beliefs()
+    click.echo(f"Found {len(derived)} derived beliefs", err=True)
+
+    # Gather all IN beliefs for count
+    all_beliefs = _gather_beliefs_for_spec([""])  # empty string matches nothing
+    # Actually count from beliefs.md directly
+    beliefs_path = Path("beliefs.md")
+    belief_count = 0
+    if beliefs_path.exists():
+        belief_count = len(re.findall(r'^### [\w-]+ \[IN\]', beliefs_path.read_text(), re.MULTILINE))
+    click.echo(f"Total IN beliefs: {belief_count}", err=True)
+
+    # Gather specs
+    all_specs = _gather_specs()
+    if specs:
+        all_specs = {k: v for k, v in all_specs.items() if k in specs}
+    click.echo(f"Found {len(all_specs)} spec(s): {', '.join(sorted(all_specs.keys()))}", err=True)
+
+    if not derived and not all_specs:
+        click.echo("No derived beliefs or specs found. Run generate-spec first.", err=True)
+        sys.exit(1)
+
+    if dry_run:
+        click.echo(f"\n=== Derived Beliefs ({len(derived)}) ===\n")
+        for b in derived:
+            click.echo(f"  {b['id']}: {b['text'][:80]}")
+        click.echo(f"\n=== Specs ({len(all_specs)}) ===\n")
+        for name in sorted(all_specs):
+            click.echo(f"  {name} ({len(all_specs[name])} chars)")
+        return
+
+    if not check_model_available(model):
+        click.echo(f"Error: Model '{model}' CLI not available", err=True)
+        sys.exit(1)
+
+    # Format derived beliefs
+    derived_text = []
+    for b in derived:
+        derived_text.append(f"### {b['id']}")
+        derived_text.append(b['text'])
+        if b.get('depends'):
+            derived_text.append(f"- Depends on: {b['depends']}")
+        derived_text.append("")
+    derived_beliefs = "\n".join(derived_text)
+
+    # Format specs (include full content, truncated)
+    specs_parts = []
+    for name, content in sorted(all_specs.items()):
+        specs_parts.append(f"## Spec: {name}\n\n{content}")
+    specs_text = "\n\n---\n\n".join(specs_parts)
+
+    config = _load_config()
+    domain = config.get("domain", "code-expert") if config else "code-expert"
+
+    prompt = GENERATE_PRD_PROMPT.format(
+        product_name=product_name,
+        domain=domain,
+        derived_beliefs=derived_beliefs,
+        specs_text=specs_text,
+        belief_count=belief_count,
+        spec_count=len(all_specs),
+    )
+
+    click.echo(f"Generating PRD with {model} ({len(prompt)} chars)...", err=True)
+    try:
+        result = asyncio.run(invoke(prompt, model, timeout=timeout))
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+    # Write output
+    if output is None:
+        output = f"docs/prd/{product_name.lower().replace(' ', '-')}.prd.md"
+    output_path = Path(output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(result + "\n")
+
+    click.echo(f"\nWrote {output_path} ({len(derived)} derived beliefs, {len(all_specs)} specs)")
+
+
 # --- derive ---
 
 
