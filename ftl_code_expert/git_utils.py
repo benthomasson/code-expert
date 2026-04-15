@@ -396,13 +396,16 @@ def list_commits_with_files(
         cwd: Working directory
 
     Returns:
-        List of dicts: [{sha, subject, files: [path, ...]}, ...] oldest first
+        List of dicts: [{sha, subject, files: [{path, status}, ...],
+        deleted_files: [path, ...]}, ...] oldest first.
+        Status is one of: A (added), M (modified), D (deleted), R (renamed),
+        C (copied), T (type changed).
     """
     if since_commit:
         range_spec = f"{since_commit}..HEAD"
-        cmd = ["git", "log", "--reverse", "--format=%H %s", "--name-only", range_spec]
+        cmd = ["git", "log", "--reverse", "--format=%H %s", "--name-status", range_spec]
     elif since:
-        cmd = ["git", "log", "--reverse", "--format=%H %s", "--name-only", f"--since={since}"]
+        cmd = ["git", "log", "--reverse", "--format=%H %s", "--name-status", f"--since={since}"]
     else:
         raise ValueError("Either since or since_commit must be provided")
 
@@ -419,9 +422,19 @@ def list_commits_with_files(
         if len(line) > 40 and line[40] == " " and all(c in "0123456789abcdef" for c in line[:40]):
             if current:
                 commits.append(current)
-            current = {"sha": line[:40], "subject": line[41:], "files": []}
+            current = {"sha": line[:40], "subject": line[41:], "files": [], "deleted_files": []}
         elif current is not None:
-            current["files"].append(line)
+            # --name-status lines: "M\tpath" or "R100\told\tnew"
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                status = parts[0][0]  # First char: A, M, D, R, C, T
+                path = parts[-1]     # Last field (handles renames: old\tnew)
+                current["files"].append(path)
+                if status == "D":
+                    current["deleted_files"].append(path)
+            else:
+                # Fallback: treat as plain filename (shouldn't happen)
+                current["files"].append(line)
 
     if current:
         commits.append(current)

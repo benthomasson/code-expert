@@ -1090,6 +1090,72 @@ def _run_general_topic(ctx, topic, model, repo_path):
     _emit(ctx, result)
 
 
+def _repo_path_to_entry_pattern(repo_path: str) -> str:
+    """Convert a repo file path to the entry-name pattern used in belief sources.
+
+    Example: src/redhat_agents/capabilities/dataverse/mart_proxy.py
+          -> src-redhat_agents-capabilities-dataverse-mart_proxy
+    """
+    # Strip .py extension
+    if repo_path.endswith(".py"):
+        repo_path = repo_path[:-3]
+    # Replace path separators with dashes
+    return repo_path.replace("/", "-").replace("\\", "-")
+
+
+def _retract_beliefs_for_deleted_files(deleted_files: set[str]) -> None:
+    """Find beliefs sourced from deleted files and retract them via reasons."""
+    beliefs_path = Path("beliefs.md")
+    if not beliefs_path.exists():
+        return
+
+    # Build entry-name patterns for deleted files
+    patterns = {_repo_path_to_entry_pattern(f) for f in deleted_files}
+
+    # Parse beliefs and find those sourced from deleted files
+    beliefs = _parse_beliefs_md(beliefs_path)
+    to_retract = []
+    for belief in beliefs:
+        source = belief.get("source", "")
+        for pattern in patterns:
+            if pattern in source:
+                to_retract.append(belief["id"])
+                break
+
+    if not to_retract:
+        click.echo(f"  No beliefs found sourced from deleted files", err=True)
+        return
+
+    deleted_names = ", ".join(sorted(deleted_files))
+    click.echo(
+        f"  Retracting {len(to_retract)} belief(s) sourced from deleted file(s): {deleted_names}",
+        err=True,
+    )
+
+    if _has_reasons() and Path("reasons.db").exists():
+        retracted = 0
+        for belief_id in to_retract:
+            result = subprocess.run(
+                ["reasons", "retract", belief_id,
+                 "--reason", f"Source file deleted: {deleted_names}"],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                retracted += 1
+                click.echo(f"    Retracted: {belief_id}", err=True)
+            else:
+                click.echo(f"    Failed to retract {belief_id}: {result.stderr.strip()}", err=True)
+        click.echo(f"  Retracted {retracted}/{len(to_retract)} belief(s)", err=True)
+    else:
+        click.echo(
+            "  WARNING: reasons.db not found — cannot retract beliefs automatically.",
+            err=True,
+        )
+        click.echo("  Beliefs to retract manually:", err=True)
+        for belief_id in to_retract:
+            click.echo(f"    - {belief_id}", err=True)
+
+
 # --- walk-commits ---
 
 
@@ -1149,24 +1215,42 @@ def walk_commits(ctx, since, since_commit, since_last, dry_run):
     # Deduplicate files across commits — only explore each file once,
     # using the latest commit that touched it
     file_to_commit: dict[str, dict] = {}
+    deleted_files: set[str] = set()
     for commit in commits:
         for f in commit["files"]:
             file_to_commit[f] = commit
+        for f in commit.get("deleted_files", []):
+            deleted_files.add(f)
+    # If a file was deleted then re-added across commits, it's not deleted
+    for f in list(deleted_files):
+        abs_path = os.path.join(abs_repo, f)
+        if os.path.isfile(abs_path):
+            deleted_files.discard(f)
 
     total_files = len(file_to_commit)
     click.echo(
         f"Found {len(commits)} commit(s), {total_files} unique file(s) to explore",
         err=True,
     )
+    if deleted_files:
+        click.echo(f"  {len(deleted_files)} file(s) deleted", err=True)
 
     if dry_run:
         for commit in commits:
             click.echo(f"\n  {commit['sha'][:8]} {commit['subject']}")
             for f in commit["files"]:
                 marker = " " if file_to_commit[f] is commit else " (earlier version, skip)"
+                if f in deleted_files:
+                    marker = " [DELETED]"
                 click.echo(f"    {marker} {f}")
         click.echo(f"\nWould explore {total_files} file(s)")
+        if deleted_files:
+            click.echo(f"Would retract beliefs sourced from {len(deleted_files)} deleted file(s)")
         return
+
+    # Retract beliefs sourced from deleted files
+    if deleted_files:
+        _retract_beliefs_for_deleted_files(deleted_files)
 
     if not check_model_available(model):
         click.echo(f"Error: Model '{model}' CLI not available", err=True)
