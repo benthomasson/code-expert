@@ -24,7 +24,10 @@ This is a code expert knowledge base for **{{DOMAIN}}**.
 3. Explain specific files/functions as needed (`code-expert explain file ...`)
 4. Propose beliefs from accumulated entries (`code-expert propose-beliefs`)
 5. Review and accept beliefs (`code-expert accept-beliefs`)
-6. Check for stale beliefs periodically (`reasons check-stale`)
+6. Derive deeper reasoning chains (`code-expert derive --auto`)
+7. Check for stale beliefs periodically (`reasons check-stale`)
+
+For ongoing tracking, run `code-expert update --since-last` to do all of the above automatically and generate a morning summary.
 
 ## Tools
 
@@ -38,10 +41,17 @@ code-expert explain repo
 code-expert topics
 
 # Belief pipeline
-code-expert propose-beliefs
+code-expert propose-beliefs          # manual review
+code-expert propose-beliefs --auto   # auto-accept all
 code-expert accept-beliefs
+code-expert derive --auto            # single round
+code-expert derive --exhaust         # loop until no new derivations
 reasons check-stale
 reasons compact
+
+# Automated update pipeline
+code-expert update --since-last      # walk commits + propose + derive + summary
+code-expert generate-summary         # standalone morning summary
 
 # Status
 code-expert status

@@ -46,6 +46,9 @@ code-expert accept-beliefs
 
 # 5. Check progress
 code-expert status
+
+# Or run the full automated pipeline in one command
+code-expert update --since-last
 ```
 
 ## How It Works
@@ -74,10 +77,16 @@ accept-beliefs    Import reviewed claims into beliefs.md / reasons.db
   ▼
 derive            Compute logical consequences across the belief network
   │                 ├── DERIVE   Conclusion holds when all premises hold
-  │                 └── GATE     Positive claim holds UNLESS a blocker is IN
+  │                 ├── GATE     Positive claim holds UNLESS a blocker is IN
+  │                 └── --exhaust Loop until no new derivations (fixed-point)
+  │
+  ▼
+generate-summary  Morning report: new gated OUT, new negative IN, critical watch list
   │
   ▼
 file-issues       OUT gated beliefs → GitHub/GitLab issues automatically
+
+update            Runs the full pipeline above in one command (--since-last)
 ```
 
 Each exploration creates a dated entry in `entries/` and may generate new topics, so the queue grows organically as you learn.
@@ -180,9 +189,10 @@ code-expert propose-beliefs
 code-expert propose-beliefs --batch-size 10
 code-expert propose-beliefs --entry entries/2026/03/09/diff-since-last.md
 code-expert propose-beliefs --all  # re-process everything
+code-expert propose-beliefs --auto # extract and accept all without review
 ```
 
-Output goes to `proposed-beliefs.md`. Each proposal is marked `[ACCEPT]` or `[REJECT]` — review and flip as needed, then import.
+Output goes to `proposed-beliefs.md`. Each proposal is marked `[ACCEPT]` or `[REJECT]` — review and flip as needed, then import. Use `--auto` to skip review and accept all proposals directly.
 
 ### `code-expert accept-beliefs`
 
@@ -200,15 +210,20 @@ Analyze the reasons network and propose deeper reasoning chains by combining exi
 ```bash
 code-expert derive              # propose derivations → proposed-derivations.md
 code-expert derive --auto       # propose and add to reasons automatically
+code-expert derive --exhaust    # loop until no new derivations (implies --auto)
 code-expert derive --dry-run    # show the prompt without invoking the LLM
+code-expert derive --topic auth # only derive from auth-related beliefs
+code-expert derive --budget 500 # include more beliefs in prompt
 ```
+
+Delegates to `reasons derive`, which handles prompt building, LLM invocation, proposal validation (including Jaccard dedup against retracted beliefs), and network updates.
 
 Proposes two types of derived beliefs:
 
 - **DERIVE**: Standard SL justification — conclusion is IN when all antecedents are IN, cascades OUT when any is retracted
 - **GATE**: Outlist-gated — positive claim holds UNLESS a negative claim (bug, gap, fragility) is IN. When the negative claim is retracted (problem fixed), the gated conclusion automatically restores
 
-Without `--auto`, proposals are written to `proposed-derivations.md` with ready-to-run `reasons add` commands for review.
+Without `--auto`, proposals are written to `proposed-derivations.md` for review. Use `--exhaust` to loop until the network reaches a fixed point (no new derivations possible).
 
 ### `code-expert file-issues`
 
@@ -227,6 +242,39 @@ For each GATE belief where the outlist node is IN (blocking the positive conclus
 - Adds the `reasons-gate` label automatically
 
 Requires `gh` (GitHub) or `glab` (GitLab) CLI to be installed and authenticated.
+
+### `code-expert update`
+
+Automated pipeline that runs the full workflow in one command: walk commits, extract and accept beliefs, derive all consequences, and generate a morning summary.
+
+```bash
+code-expert update --since-last              # from last checkpoint
+code-expert update --since "1 week ago"      # from a date
+code-expert update --since-last --file-issues # also file GitHub issues
+```
+
+The pipeline:
+1. `walk-commits --since-last` — explore changed files
+2. `propose-beliefs --auto` — extract and accept beliefs without review
+3. `derive --exhaust` — compute all logical consequences until fixed point
+4. `generate-summary` — morning report entry
+
+Each step continues on non-fatal errors. The summary entry highlights what's new and what's critical.
+
+### `code-expert generate-summary`
+
+Generate a morning summary entry of belief state. The summary includes:
+
+- **New gated OUT beliefs** — conclusions blocked by active negative findings
+- **New negative IN beliefs** — bugs, gaps, and security issues just discovered
+- **Critical watch list** — high-severity issues always shown regardless of age (security, injection, authentication, data loss, etc.)
+- **Statistics** — belief counts, derivation counts, new vs existing
+
+```bash
+code-expert generate-summary  # standalone summary
+```
+
+When called via `update`, the summary automatically detects which beliefs are new (added during the current run) vs pre-existing.
 
 ### `code-expert status`
 
@@ -293,7 +341,8 @@ CLAUDE.md                 # AI assistant instructions
 - **Start broad, go deep.** `scan` gives you the lay of the land. `explore` digs into specifics. Each explanation surfaces new topics.
 - **Use `--since` for ongoing tracking.** After the first `explain diff --since DATE`, subsequent runs with `--since-last` pick up automatically.
 - **Review proposals carefully.** The model proposes beliefs — you decide which are worth keeping. Flip `[REJECT]` to `[ACCEPT]` for claims you verify.
-- **Run `derive` after accepting beliefs.** This is where architectural insights emerge — the system connects individual observations into higher-level conclusions and identifies which ones are broken.
+- **Run `update --since-last` nightly.** This is the easiest way to keep the knowledge base current — one command walks new commits, extracts beliefs, derives consequences, and writes a summary you can read in the morning.
+- **Run `derive --exhaust` after accepting beliefs.** This is where architectural insights emerge — the system connects individual observations into higher-level conclusions and identifies which ones are broken. `--exhaust` loops until no new derivations are possible.
 - **Use `file-issues` to close the loop.** OUT gated beliefs become GitHub issues with specific blockers and resolution instructions. Fix the code, retract the blocker in the RMS, and the gated belief automatically restores to IN.
 - **Run `status` periodically.** It shows stale beliefs, unexplored commits, and pending proposals.
 - **Cross-repo exploration.** Use `-r` to point at any repo without re-initializing.
