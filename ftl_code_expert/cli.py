@@ -2430,12 +2430,14 @@ def _load_network() -> dict:
               help="Show what would be sent to the LLM without invoking it")
 @click.option("--budget", type=int, default=300,
               help="Maximum number of beliefs in prompt (default: 300)")
+@click.option("--sample/--no-sample", default=True,
+              help="Randomly sample beliefs instead of alphabetical truncation (default: on)")
 @click.option("--topic", default=None,
               help="Keyword filter — only include beliefs matching these keywords")
 @click.option("--max-rounds", type=int, default=10,
               help="Maximum rounds for --exhaust (default: 10)")
 @click.pass_context
-def derive(ctx, output, model, auto_add, exhaust, dry_run, budget, topic, max_rounds):
+def derive(ctx, output, model, auto_add, exhaust, dry_run, budget, sample, topic, max_rounds):
     """Derive deeper reasoning chains from existing beliefs.
 
     Delegates to `reasons derive` which handles prompt building, LLM
@@ -2456,10 +2458,12 @@ def derive(ctx, output, model, auto_add, exhaust, dry_run, budget, topic, max_ro
 
     if model is None:
         model = ctx.obj["model"]
-    timeout = ctx.obj["timeout"]
+    timeout = ctx.obj["timeout"] if ctx.obj["timeout"] != 300 else 600
 
     cmd = ["reasons", "derive", "-m", model, "--timeout", str(timeout),
            "--budget", str(budget), "-o", output]
+    if sample:
+        cmd.append("--sample")
     if auto_add or exhaust:
         cmd.append("--auto")
     if exhaust:
