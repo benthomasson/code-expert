@@ -7,7 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 import click
@@ -2946,7 +2946,9 @@ def update(ctx, since, since_commit, since_last, do_file_issues):
     from .caffeinate import hold as _caffeinate
     _caffeinate()
 
+    project_dir = _get_project_dir(ctx)
     errors = []
+    started = datetime.now().isoformat(timespec="seconds")
 
     # Snapshot current node IDs before any changes
     try:
@@ -3014,6 +3016,28 @@ def update(ctx, since, since_commit, since_last, do_file_issues):
         except Exception as e:
             errors.append(f"file-issues: {e}")
             click.echo(f"WARN: file-issues failed: {e}", err=True)
+
+    # Save update checkpoint
+    try:
+        post_network = _load_network()
+        post_run_ids = set(post_network.get("nodes", {}).keys())
+    except Exception:
+        post_run_ids = pre_run_ids
+
+    checkpoint = {
+        "started": started,
+        "finished": datetime.now().isoformat(timespec="seconds"),
+        "beliefs_before": len(pre_run_ids),
+        "beliefs_after": len(post_run_ids),
+        "beliefs_added": len(post_run_ids - pre_run_ids),
+        "errors": errors,
+    }
+    if project_dir:
+        os.makedirs(project_dir, exist_ok=True)
+        checkpoint_path = os.path.join(project_dir, "last-update.json")
+        with open(checkpoint_path, "w") as f:
+            json.dump(checkpoint, f, indent=2)
+        click.echo(f"Update checkpoint saved to {checkpoint_path}", err=True)
 
     # Final report
     click.echo("\n=== Update complete ===\n", err=True)
