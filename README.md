@@ -41,7 +41,7 @@ code-expert explore --skip   # skip and move on
 
 # 4. Extract beliefs from your exploration entries
 code-expert propose-beliefs
-# Review proposed-beliefs.md — mark entries ACCEPT or REJECT
+code-expert review-proposals  # LLM quality filter
 code-expert accept-beliefs
 
 # 5. Check progress
@@ -70,6 +70,9 @@ walk-commits      Walk commits since a date/SHA, explore each changed file
   │
   ▼
 propose-beliefs   Batch-extract factual claims from entries
+  │
+  ▼
+review-proposals  LLM quality filter (meta, duplicate, ephemeral, speculative, trivial)
   │
   ▼
 accept-beliefs    Import reviewed claims into beliefs.md / reasons.db
@@ -190,9 +193,22 @@ code-expert propose-beliefs --batch-size 10
 code-expert propose-beliefs --entry entries/2026/03/09/diff-since-last.md
 code-expert propose-beliefs --all  # re-process everything
 code-expert propose-beliefs --auto # extract and accept all without review
+code-expert propose-beliefs --since 2026-04-01  # only entries from this date onward
 ```
 
-Output goes to `proposed-beliefs.md`. Each proposal is marked `[ACCEPT]` or `[REJECT]` — review and flip as needed, then import. Use `--auto` to skip review and accept all proposals directly.
+Output goes to `proposed-beliefs.md`. Each proposal is marked `[ACCEPT]` or `[REJECT]` — review and flip as needed, then import. Use `--auto` to skip review and accept all proposals directly. Use `--since` to limit processing to entries from a specific date onward (matches the `entries/YYYY/MM/DD/` directory structure).
+
+### `code-expert review-proposals`
+
+Filter low-quality belief proposals using LLM review. Sends proposals in batches to the LLM along with existing beliefs context for deduplication. Each proposal is judged against rejection criteria: meta, duplicate, ephemeral, speculative, trivial.
+
+```bash
+code-expert review-proposals
+code-expert review-proposals --batch-size 30
+code-expert review-proposals --file my-proposals.md
+```
+
+Pipeline position: `propose-beliefs` → `review-proposals` → `accept-beliefs`. The review step marks rejected proposals as `[REJECT]` with a reason in `proposed-beliefs.md`, so `accept-beliefs` only imports the survivors.
 
 ### `code-expert accept-beliefs`
 
@@ -245,7 +261,7 @@ Requires `gh` (GitHub) or `glab` (GitLab) CLI to be installed and authenticated.
 
 ### `code-expert update`
 
-Automated pipeline that runs the full workflow in one command: walk commits, extract and accept beliefs, derive all consequences, and generate a morning summary.
+Automated pipeline that runs the full workflow in one command: walk commits, extract beliefs, review for quality, accept, derive all consequences, and generate a morning summary.
 
 ```bash
 code-expert update --since-last              # from last checkpoint
@@ -255,9 +271,11 @@ code-expert update --since-last --file-issues # also file GitHub issues
 
 The pipeline:
 1. `walk-commits --since-last` — explore changed files
-2. `propose-beliefs --auto` — extract and accept beliefs without review
-3. `derive --exhaust` — compute all logical consequences until fixed point
-4. `generate-summary` — morning report entry
+2. `propose-beliefs --since` — extract beliefs from new entries only
+3. `review-proposals` — LLM quality filter (rejects meta, duplicate, ephemeral, speculative, trivial)
+4. `accept-beliefs` — import reviewed beliefs
+5. `derive --exhaust` — compute all logical consequences until fixed point
+6. `generate-summary` — morning report entry
 
 Each step continues on non-fatal errors. The summary entry highlights what's new and what's critical.
 

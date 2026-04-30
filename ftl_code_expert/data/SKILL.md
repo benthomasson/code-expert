@@ -1,7 +1,7 @@
 ---
 name: code-expert
 description: Build expert knowledge bases from codebases — explore, explain, extract beliefs
-argument-hint: "[init|scan|explain|explore|walk-commits|update|topics|propose-beliefs|accept-beliefs|derive|generate-summary|file-issues|status]"
+argument-hint: "[init|scan|explain|explore|walk-commits|update|topics|propose-beliefs|review-proposals|accept-beliefs|derive|generate-summary|file-issues|status]"
 allowed-tools: Bash(code-expert *), Bash(uv run code-expert *), Bash(uvx *ftl-code-expert*), Read, Grep, Glob
 ---
 
@@ -26,7 +26,8 @@ code-expert explore --pick 1,3,8           # explore multiple by index (stable i
 code-expert explore --skip                 # skip one
 code-expert topics                         # see exploration queue
 code-expert propose-beliefs                # extract beliefs from entries
-# edit proposed-beliefs.md: mark [ACCEPT] or [REJECT]
+code-expert review-proposals               # LLM quality filter
+# edit proposed-beliefs.md if needed
 code-expert accept-beliefs                 # import accepted beliefs
 code-expert derive --auto                  # derive deeper reasoning chains
 code-expert status                         # dashboard
@@ -46,11 +47,12 @@ code-expert update --since-last            # full pipeline + morning summary
 - `explore [--skip] [--pick N[,N,...]] [--loop N]` — Work through topic queue (--loop N explores up to N topics continuously)
 - `walk-commits --since DATE|--since-commit SHA|--since-last [--dry-run]` — Walk commits and explore each changed file
 - `topics [--all]` — Show exploration queue
-- `propose-beliefs [--auto]` — Extract beliefs from entries (`--auto` accepts all without review)
+- `propose-beliefs [--auto] [--since DATE]` — Extract beliefs from entries (`--auto` accepts all without review; `--since` filters by entry date)
+- `review-proposals [--batch-size N]` — LLM quality filter: rejects meta, duplicate, ephemeral, speculative, trivial proposals
 - `accept-beliefs` — Import accepted beliefs (uses `reasons` if installed, falls back to `beliefs`)
 - `derive [--auto] [--exhaust] [--dry-run]` — Propose deeper reasoning chains (`--exhaust` loops until no new derivations; delegates to `reasons derive`)
 - `generate-summary` — Morning summary entry: new gated OUT beliefs, new negative IN beliefs, critical watch list
-- `update --since-last|--since DATE [--file-issues]` — Full automated pipeline: walk-commits → propose-beliefs --auto → derive --exhaust → generate-summary
+- `update --since-last|--since DATE [--file-issues]` — Full automated pipeline: walk-commits → propose-beliefs → review-proposals → accept-beliefs → derive --exhaust → generate-summary
 - `file-issues [--dry-run] [--repo OWNER/REPO] [--label L]` — File issues from gated beliefs with active blockers (GitHub/GitLab)
 - `status` — Dashboard (shows reasons.db stats if available)
 
@@ -61,6 +63,7 @@ If the user says:
 - "what should I look at next" → `code-expert explore`
 - "explain this file" → `code-expert explain file <path>`
 - "extract what we've learned" → `code-expert propose-beliefs`
+- "review the proposals" / "filter proposals" → `code-expert review-proposals`
 - "build deeper chains" / "derive conclusions" → `code-expert derive`
 - "derive everything" / "exhaust derivations" → `code-expert derive --exhaust`
 - "file issues for blockers" / "what's blocking features" → `code-expert file-issues --dry-run`

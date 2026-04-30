@@ -31,6 +31,7 @@ from .llm import check_model_available, invoke, invoke_sync
 from .observations import parse_observation_requests, run_observations
 from .prompts import (
     PROPOSE_BELIEFS_CODE,
+    REVIEW_PROMPT,
     build_diff_prompt,
     build_diff_summary_prompt,
     build_file_prompt,
@@ -98,6 +99,20 @@ def _emit(ctx, text: str) -> None:
     """Print to stdout unless --quiet."""
     if not ctx.obj.get("quiet"):
         click.echo(text)
+
+
+def _entry_date(path: Path) -> str | None:
+    """Extract YYYY-MM-DD date from an entry path like entries/2026/04/30/foo.md."""
+    parts = path.parts
+    for i, part in enumerate(parts):
+        if part == "entries" and i + 3 < len(parts):
+            try:
+                y, m, d = parts[i + 1], parts[i + 2], parts[i + 3]
+                if len(y) == 4 and len(m) == 2 and len(d) == 2:
+                    return f"{y}-{m}-{d}"
+            except (IndexError, ValueError):
+                pass
+    return None
 
 
 def _create_entry(topic: str, title: str, content: str) -> None:
@@ -1303,8 +1318,10 @@ def walk_commits(ctx, since, since_commit, since_last, dry_run):
               help="Re-process all entries (ignore processed tracking)")
 @click.option("--auto", "auto_accept", is_flag=True, default=False,
               help="Automatically accept all proposed beliefs (no review step)")
+@click.option("--since", default=None,
+              help="Only process entries from this date onward (YYYY-MM-DD)")
 @click.pass_context
-def propose_beliefs(ctx, batch_size, output, model, entry_paths, process_all, auto_accept):
+def propose_beliefs(ctx, batch_size, output, model, entry_paths, process_all, auto_accept, since):
     """Extract candidate beliefs from entries for human review."""
     from .caffeinate import hold as _caffeinate
     _caffeinate()
@@ -1329,6 +1346,15 @@ def propose_beliefs(ctx, batch_size, output, model, entry_paths, process_all, au
     if not entries:
         click.echo("No .md files found.")
         return
+
+    # Filter by date if --since provided
+    if since:
+        before = len(entries)
+        entries = [e for e in entries if (_entry_date(e) or "") >= since]
+        click.echo(f"Filtered to {len(entries)} entries since {since} (from {before} total)", err=True)
+        if not entries:
+            click.echo("No entries found since that date.")
+            return
 
     # Filter out already-processed entries (unless --all or --entry)
     processed_path = Path(PROJECT_DIR) / "proposed-entries.json"
@@ -1619,6 +1645,196 @@ def accept_beliefs(proposals_file):
 
     click.echo(f"Found {len(matches)} accepted beliefs")
     _accept_proposals(matches)
+
+
+# --- review-proposals ---
+
+
+def _build_existing_beliefs_section(nodes: dict) -> str:
+    """Build a compact existing beliefs reference for the review prompt."""
+    if not nodes:
+        return "(No existing beliefs)"
+    lines = []
+    for node_id, node in sorted(nodes.items()):
+        text = node.get("text", "")[:100]
+        tv = node.get("truth_value", "?")
+        lines.append(f"- `{node_id}` [{tv}]: {text}")
+    if len(lines) > 300:
+        lines = lines[:300]
+        lines.append(f"... and {len(nodes) - 300} more beliefs")
+    return "\n".join(lines)
+
+
+def _build_proposals_section(proposals: list[dict]) -> str:
+    """Format proposals for the review prompt."""
+    lines = []
+    for p in proposals:
+        lines.append(f"### {p['id']}")
+        lines.append(p["text"])
+        lines.append(f"- Source: {p['source']}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _parse_review_response(response: str) -> dict[str, tuple[bool, str | None]]:
+    """Parse LLM review response into accept/reject decisions."""
+    decisions = {}
+    for line in response.splitlines():
+        line = line.strip()
+        if line.startswith("ACCEPT "):
+            belief_id = line[7:].strip()
+            decisions[belief_id] = (False, None)
+        elif line.startswith("REJECT "):
+            rest = line[7:].strip()
+            parts = rest.split(" ", 1)
+            belief_id = parts[0]
+            reason = parts[1] if len(parts) > 1 else "rejected by review"
+            decisions[belief_id] = (True, reason)
+    return decisions
+
+
+@cli.command("review-proposals")
+@click.option("--file", "proposals_file", default="proposed-beliefs.md",
+              help="Proposals file to review")
+@click.option("--batch-size", type=int, default=20,
+              help="Proposals per LLM batch (default: 20)")
+@click.pass_context
+def review_proposals(ctx, proposals_file, batch_size):
+    """Filter low-quality belief proposals using LLM review.
+
+    Sends proposals in batches to an LLM along with existing beliefs context.
+    The LLM judges each proposal against rejection criteria:
+    meta, duplicate, ephemeral, speculative, trivial.
+
+    Pipeline position: propose-beliefs → review-proposals → accept-beliefs
+    """
+    model = ctx.obj["model"]
+    timeout = ctx.obj["timeout"]
+
+    proposals_path = Path(proposals_file)
+    if not proposals_path.exists():
+        click.echo(f"Proposals file not found: {proposals_file}")
+        sys.exit(1)
+
+    if not check_model_available(model):
+        click.echo(f"Error: Model '{model}' CLI not available", err=True)
+        sys.exit(1)
+
+    text = proposals_path.read_text()
+
+    try:
+        network = _load_network()
+        existing_nodes = network.get("nodes", {})
+    except Exception:
+        existing_nodes = {}
+
+    proposal_pattern = re.compile(
+        r"(### \[?(?:ACCEPT(?:/REJECT)?|REJECT)\]?)\s*(\S+)\n"
+        r"(.+?)\n"
+        r"(- Source: .+?)(?=\n###|\n---|\Z)",
+        re.DOTALL,
+    )
+
+    matches = list(proposal_pattern.finditer(text))
+    if not matches:
+        click.echo("No proposals found in file.")
+        return
+
+    to_review = []
+    already_rejected = 0
+    for match in matches:
+        header = match.group(1)
+        if "[REJECT]" in header and "[ACCEPT" not in header:
+            already_rejected += 1
+            continue
+        to_review.append({
+            "match": match,
+            "header": header,
+            "id": match.group(2),
+            "text": match.group(3).strip(),
+            "source": match.group(4).strip().removeprefix("- Source: "),
+        })
+
+    if not to_review:
+        click.echo("No proposals to review (all already rejected).", err=True)
+        return
+
+    click.echo(f"Reviewing {len(to_review)} proposals ({already_rejected} already rejected)...", err=True)
+
+    existing_beliefs = _build_existing_beliefs_section(existing_nodes)
+
+    all_decisions: dict[str, tuple[bool, str | None]] = {}
+    batches = [to_review[i:i + batch_size] for i in range(0, len(to_review), batch_size)]
+
+    for i, batch in enumerate(batches):
+        click.echo(f"  Batch {i + 1}/{len(batches)} ({len(batch)} proposals)...", err=True)
+
+        proposals_section = _build_proposals_section(batch)
+        prompt = REVIEW_PROMPT.format(
+            existing_beliefs=existing_beliefs,
+            proposals=proposals_section,
+        )
+
+        try:
+            result = invoke_sync(prompt, model=model, timeout=timeout)
+            decisions = _parse_review_response(result)
+            all_decisions.update(decisions)
+        except Exception as e:
+            click.echo(f"  ERROR in batch {i + 1}: {e}", err=True)
+            continue
+
+    kept = 0
+    rejected = 0
+    categories: dict[str, int] = {}
+    replacements: list[tuple[str, str]] = []
+
+    for proposal in to_review:
+        belief_id = proposal["id"]
+        match = proposal["match"]
+        header = proposal["header"]
+
+        decision = all_decisions.get(belief_id)
+        if decision is None:
+            kept += 1
+            continue
+
+        reject, reason = decision
+        if reject:
+            rejected += 1
+            category = reason.split(":")[0].strip() if reason else "unknown"
+            categories[category] = categories.get(category, 0) + 1
+
+            old_block = match.group(0)
+            new_header = f"### [REJECT] {belief_id}"
+            new_block = old_block.replace(
+                f"{header} {belief_id}",
+                new_header,
+                1,
+            )
+            source_line = match.group(4).strip()
+            new_block = new_block.replace(
+                source_line,
+                f"{source_line}\n- Rejected: {reason}",
+                1,
+            )
+            replacements.append((old_block, new_block))
+            click.echo(f"  REJECT {belief_id}: {reason}", err=True)
+        else:
+            kept += 1
+
+    click.echo(f"\nReviewed {len(to_review)} proposals: {kept} kept, {rejected} rejected", err=True)
+    if categories:
+        click.echo("Rejections by category:", err=True)
+        for cat, count in sorted(categories.items(), key=lambda x: -x[1]):
+            click.echo(f"  {cat}: {count}", err=True)
+
+    if replacements:
+        for old_block, new_block in replacements:
+            text = text.replace(old_block, new_block, 1)
+        proposals_path.write_text(text)
+        click.echo(f"Updated {proposals_file}", err=True)
+    else:
+        click.echo("No changes needed.", err=True)
 
 
 def _load_existing_beliefs(beliefs_path: Path) -> list[dict]:
@@ -2946,9 +3162,11 @@ def update(ctx, since, since_commit, since_last, do_file_issues):
 
     Runs the full pipeline in one command:
       1. walk-commits (explore changed files)
-      2. propose-beliefs --auto (extract and accept beliefs)
-      3. derive --exhaust (compute all logical consequences)
-      4. generate-summary (morning report entry)
+      2. propose-beliefs (extract beliefs from new entries)
+      3. review-proposals (LLM quality filter)
+      4. accept-beliefs (import reviewed beliefs)
+      5. derive --exhaust (compute all logical consequences)
+      6. generate-summary (morning report entry)
 
     Example:
         code-expert update --since-last
@@ -2961,6 +3179,22 @@ def update(ctx, since, since_commit, since_last, do_file_issues):
     project_dir = _get_project_dir(ctx)
     errors = []
     started = datetime.now().isoformat(timespec="seconds")
+
+    # Resolve effective since date for propose-beliefs --since filtering
+    effective_since = since
+    if not effective_since and since_last and project_dir:
+        checkpoint_path = os.path.join(project_dir, "last-update.json")
+        if os.path.isfile(checkpoint_path):
+            try:
+                with open(checkpoint_path) as f:
+                    prev = json.load(f)
+                effective_since = prev.get("since") or prev.get("started", "")[:10]
+            except (json.JSONDecodeError, ValueError):
+                pass
+        if not effective_since:
+            checkpoint = load_diff_checkpoint(project_dir)
+            if checkpoint and checkpoint.get("timestamp"):
+                effective_since = checkpoint["timestamp"][:10]
 
     # Snapshot current node IDs before any changes
     try:
@@ -2982,10 +3216,10 @@ def update(ctx, since, since_commit, since_last, do_file_issues):
         errors.append(f"walk-commits: {e}")
         click.echo(f"WARN: walk-commits failed: {e}, continuing...", err=True)
 
-    # Step 2: propose-beliefs --auto
-    click.echo("\n=== Step 2: Propose and accept beliefs ===\n", err=True)
+    # Step 2: propose-beliefs (with --since filtering)
+    click.echo("\n=== Step 2: Propose beliefs ===\n", err=True)
     try:
-        ctx.invoke(propose_beliefs, auto_accept=True)
+        ctx.invoke(propose_beliefs, since=effective_since)
     except SystemExit as e:
         if e.code and e.code != 0:
             errors.append(f"propose-beliefs exited with code {e.code}")
@@ -2994,8 +3228,32 @@ def update(ctx, since, since_commit, since_last, do_file_issues):
         errors.append(f"propose-beliefs: {e}")
         click.echo(f"WARN: propose-beliefs failed: {e}, continuing...", err=True)
 
-    # Step 3: derive --exhaust
-    click.echo("\n=== Step 3: Derive (exhaust) ===\n", err=True)
+    # Step 3: review-proposals (LLM quality filter)
+    click.echo("\n=== Step 3: Review proposals ===\n", err=True)
+    try:
+        ctx.invoke(review_proposals)
+    except SystemExit as e:
+        if e.code and e.code != 0:
+            errors.append(f"review-proposals exited with code {e.code}")
+            click.echo(f"WARN: review-proposals failed (exit {e.code}), continuing...", err=True)
+    except Exception as e:
+        errors.append(f"review-proposals: {e}")
+        click.echo(f"WARN: review-proposals failed: {e}, continuing...", err=True)
+
+    # Step 4: accept-beliefs
+    click.echo("\n=== Step 4: Accept beliefs ===\n", err=True)
+    try:
+        ctx.invoke(accept_beliefs)
+    except SystemExit as e:
+        if e.code and e.code != 0:
+            errors.append(f"accept-beliefs exited with code {e.code}")
+            click.echo(f"WARN: accept-beliefs failed (exit {e.code}), continuing...", err=True)
+    except Exception as e:
+        errors.append(f"accept-beliefs: {e}")
+        click.echo(f"WARN: accept-beliefs failed: {e}, continuing...", err=True)
+
+    # Step 5: derive --exhaust
+    click.echo("\n=== Step 5: Derive (exhaust) ===\n", err=True)
     try:
         ctx.invoke(derive, exhaust=True)
     except SystemExit as e:
@@ -3006,8 +3264,8 @@ def update(ctx, since, since_commit, since_last, do_file_issues):
         errors.append(f"derive: {e}")
         click.echo(f"WARN: derive failed: {e}, continuing...", err=True)
 
-    # Step 4: generate-summary
-    click.echo("\n=== Step 4: Generate summary ===\n", err=True)
+    # Step 6: generate-summary
+    click.echo("\n=== Step 6: Generate summary ===\n", err=True)
     try:
         ctx.invoke(generate_summary, snapshot_ids=tuple(pre_run_ids))
     except SystemExit as e:
@@ -3017,9 +3275,9 @@ def update(ctx, since, since_commit, since_last, do_file_issues):
         errors.append(f"generate-summary: {e}")
         click.echo(f"WARN: generate-summary failed: {e}", err=True)
 
-    # Step 5 (opt-in): file-issues
+    # Step 7 (opt-in): file-issues
     if do_file_issues:
-        click.echo("\n=== Step 5: File issues ===\n", err=True)
+        click.echo("\n=== Step 7: File issues ===\n", err=True)
         try:
             ctx.invoke(file_issues)
         except SystemExit as e:
@@ -3039,6 +3297,7 @@ def update(ctx, since, since_commit, since_last, do_file_issues):
     checkpoint = {
         "started": started,
         "finished": datetime.now().isoformat(timespec="seconds"),
+        "since": effective_since,
         "beliefs_before": len(pre_run_ids),
         "beliefs_after": len(post_run_ids),
         "beliefs_added": len(post_run_ids - pre_run_ids),
