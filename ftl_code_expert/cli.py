@@ -2779,6 +2779,14 @@ _NEGATIVE_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
+_POSITIVE_CONTEXT = re.compile(
+    r"\b(is safe|is crash.safe|is secure|is protected|is validated|is tested|"
+    r"has no gaps|no.gaps|are safe|are secure|are validated|are protected|"
+    r"safely|gapless|sustainable|preserving|prevents|ensuring|"
+    r"outlist injection|dependency injection|fault injection)\b",
+    re.IGNORECASE,
+)
+
 _CRITICAL_KEYWORDS = re.compile(
     r"\b(security|injection|authentication|data loss|production|credential|vulnerability|"
     r"authorization|privilege|encryption|secret|password|token|remote code|command injection|"
@@ -2816,13 +2824,13 @@ def _find_gated_out_beliefs(nodes: dict) -> list[dict]:
 
 
 def _find_negative_in_beliefs(nodes: dict) -> list[dict]:
-    """Find IN beliefs with negative-signal keywords."""
+    """Find IN beliefs with negative-signal keywords, excluding positive assertions."""
     results = []
     for nid, node in nodes.items():
         if node.get("truth_value") != "IN":
             continue
         text = node.get("text", "")
-        if _NEGATIVE_KEYWORDS.search(text):
+        if _NEGATIVE_KEYWORDS.search(text) and not _POSITIVE_CONTEXT.search(text):
             results.append({"id": nid, "text": text})
     return results
 
@@ -2879,7 +2887,7 @@ def generate_summary(ctx, snapshot_ids):
         new_gated = all_gated
         new_negative = all_negative
 
-    # Critical watch list — always shown regardless of age
+    # Critical watch list — only problems, not positive assertions about safety
     critical_gated = [b for b in all_gated if _CRITICAL_KEYWORDS.search(b["text"])
                       or any(_CRITICAL_KEYWORDS.search(bl["text"]) for bl in b["blockers"])]
     critical_negative = [b for b in all_negative if _CRITICAL_KEYWORDS.search(b["text"])]
