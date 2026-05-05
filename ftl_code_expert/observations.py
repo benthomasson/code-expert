@@ -280,6 +280,49 @@ async def file_imports(file_path: str, repo_path: str) -> dict[str, Any]:
         return {"error": str(e), "file": file_path}
 
 
+async def sentrux_scan(repo_path: str) -> dict[str, Any]:
+    """Run sentrux structural quality analysis on the repository."""
+    import shutil
+
+    if not shutil.which("sentrux"):
+        return {"error": "sentrux not installed"}
+
+    proc = await asyncio.create_subprocess_exec(
+        "sentrux", "gate", "--save", repo_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return {"error": "sentrux timed out after 60s"}
+
+    if proc.returncode != 0:
+        return {"error": f"sentrux failed: {stderr.decode().strip()}"}
+
+    baseline_path = Path(repo_path) / ".sentrux" / "baseline.json"
+    if not baseline_path.exists():
+        return {"error": "sentrux did not produce baseline.json"}
+
+    try:
+        data = json.loads(baseline_path.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        return {"error": f"Failed to read baseline: {e}"}
+
+    return {
+        "quality_signal": round(data.get("quality_signal", 0) * 10000),
+        "coupling_score": data.get("coupling_score", 0),
+        "cycle_count": data.get("cycle_count", 0),
+        "god_file_count": data.get("god_file_count", 0),
+        "hotspot_count": data.get("hotspot_count", 0),
+        "complex_fn_count": data.get("complex_fn_count", 0),
+        "max_depth": data.get("max_depth", 0),
+        "total_import_edges": data.get("total_import_edges", 0),
+        "cross_module_edges": data.get("cross_module_edges", 0),
+    }
+
+
 # Registry of all observation tools
 OBSERVATION_TOOLS: dict[str, Any] = {
     "grep": grep,
@@ -288,6 +331,7 @@ OBSERVATION_TOOLS: dict[str, Any] = {
     "find_symbol": find_symbol,
     "find_usages": find_usages,
     "file_imports": file_imports,
+    "sentrux": sentrux_scan,
 }
 
 

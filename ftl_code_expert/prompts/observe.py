@@ -27,6 +27,7 @@ Do NOT answer the question yet. Only request observations.
 | `find_symbol` | Find where a class/function is defined | `symbol` |
 | `find_usages` | Find where a symbol is used | `symbol` |
 | `file_imports` | Extract imports from a file | `file_path` |
+| `sentrux` | Structural quality analysis (modularity, cycles, complexity) | _(no params)_ |
 
 ## Output Format
 
@@ -45,6 +46,7 @@ Output a JSON array of observation requests:
 - Start with `find_symbol` or `grep` to locate relevant code, then `read_file` to read it.
 - If you can identify the right file from the tree, go straight to `read_file`.
 - For conceptual questions, use `grep` to find where the concept appears in code.
+- Use `sentrux` when the question involves architecture, modularity, coupling, or code quality metrics.
 
 Now output your observation requests as JSON:
 """

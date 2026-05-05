@@ -72,6 +72,10 @@ If the user says:
 - "morning summary" / "what's the status" → `code-expert generate-summary`
 - "how far along are we" → `code-expert status`
 
+## Integrations
+
+- **sentrux** — If `sentrux` is on PATH, it's available as an observation tool during `explore`. The LLM can request structural quality analysis (modularity, cycles, complexity, god files) when exploring architecture topics.
+
 ## Belief Storage
 
 When `ftl-reasons` is installed (`reasons` CLI on PATH), `accept-beliefs` writes directly to `reasons.db` and re-exports `beliefs.md` and `network.json`. When only `ftl-beliefs` is installed, it writes to `beliefs.md` directly. The `init` command sets up whichever store is available.

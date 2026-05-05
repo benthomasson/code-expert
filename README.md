@@ -364,3 +364,4 @@ CLAUDE.md                 # AI assistant instructions
 - **Use `file-issues` to close the loop.** OUT gated beliefs become GitHub issues with specific blockers and resolution instructions. Fix the code, retract the blocker in the RMS, and the gated belief automatically restores to IN.
 - **Run `status` periodically.** It shows stale beliefs, unexplored commits, and pending proposals.
 - **Cross-repo exploration.** Use `-r` to point at any repo without re-initializing.
+- **Sentrux integration.** If [`sentrux`](https://github.com/anthropics/sentrux) is installed, it's available as an observation tool during `explore`. When exploring architecture topics, the model can request structural quality analysis — modularity, cycles, complexity distribution, god files — and incorporate the results into its explanation.
