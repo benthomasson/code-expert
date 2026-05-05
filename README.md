@@ -321,6 +321,7 @@ code-expert install-skill --skill-dir .claude/skills/code-expert
 | `--repo`, `-r` | Repository root (default: from config or cwd) |
 | `--model`, `-m` | Model to use: `claude` or `gemini` (default: claude) |
 | `--quiet`, `-q` | Suppress explanation output to stdout |
+| `--parallel`, `-j` | Max concurrent LLM calls (default: 3) |
 | `--version` | Show version |
 
 The `-r` flag lets you work across repos:

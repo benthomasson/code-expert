@@ -27,7 +27,7 @@ from .git_utils import (
     load_diff_checkpoint,
     save_diff_checkpoint,
 )
-from .llm import check_model_available, invoke, invoke_sync
+from .llm import check_model_available, invoke, invoke_concurrent, invoke_concurrent_sync, invoke_sync
 from .observations import parse_observation_requests, run_observations
 from .prompts import (
     PROPOSE_BELIEFS_CODE,
@@ -46,6 +46,7 @@ from .topics import (
     parse_topics_from_response,
     pending_count,
     pop_at,
+    pop_batch,
     pop_multiple,
     pop_next,
     skip_topic,
@@ -233,13 +234,15 @@ def _find_entry_points(repo_path: str, config_content: str | None) -> list[str]:
               default=None, help="Repository root (default: from config or cwd)")
 @click.option("--model", "-m", default="claude", help="Model to use (default: claude)")
 @click.option("--timeout", "-t", default=300, type=int, help="LLM timeout in seconds (default: 300)")
+@click.option("--parallel", "-j", default=3, type=int, help="Max concurrent LLM calls (default: 3)")
 @click.pass_context
-def cli(ctx, quiet, repo, model, timeout):
+def cli(ctx, quiet, repo, model, timeout, parallel):
     """Build expert knowledge bases from codebases."""
     ctx.ensure_object(dict)
     ctx.obj["quiet"] = quiet
     ctx.obj["model"] = model
     ctx.obj["timeout"] = timeout
+    ctx.obj["parallel"] = max(1, parallel)
     if repo:
         ctx.obj["repo"] = os.path.abspath(repo)
     else:
@@ -754,31 +757,48 @@ def explore(ctx, do_skip, pick_index, loop_max):
     abs_repo = os.path.abspath(repo_path)
     model = ctx.obj["model"]
     timeout = ctx.obj["timeout"]
+    parallel = ctx.obj["parallel"]
 
-    for seq, (idx, topic) in enumerate(valid_topics):
-        if len(valid_topics) > 1:
-            click.echo(f"\n{'=' * 40}", err=True)
-            click.echo(f"[{seq + 1}/{len(valid_topics)}] Topic #{idx}", err=True)
-            click.echo(f"{'=' * 40}", err=True)
+    topics_only = [topic for _, topic in valid_topics]
+    for seq, (_, topic) in enumerate(valid_topics):
+        click.echo(f"  [{seq + 1}/{len(valid_topics)}] [{topic.kind}] {topic.target}", err=True)
 
-        click.echo(f"Topic: [{topic.kind}] {topic.target}", err=True)
-        click.echo(f"  {topic.title}", err=True)
-        if topic.source:
-            click.echo(f"  (from {topic.source})", err=True)
-        click.echo(err=True)
+    if parallel > 1 and len(topics_only) > 1:
+        click.echo(f"\nExploring {len(topics_only)} topics (parallel={parallel})...", err=True)
+        results = asyncio.run(
+            _explore_topics_concurrent(topics_only, model, abs_repo, timeout, parallel)
+        )
+        for r in results:
+            if isinstance(r, Exception):
+                click.echo(f"  Error: {r}", err=True)
+            elif r is not None:
+                _, result, entry_name, entry_title, source = r
+                _finalize_topic(ctx, entry_name, entry_title, source, result)
+    else:
+        for seq, (idx, topic) in enumerate(valid_topics):
+            if len(valid_topics) > 1:
+                click.echo(f"\n{'=' * 40}", err=True)
+                click.echo(f"[{seq + 1}/{len(valid_topics)}] Topic #{idx}", err=True)
+                click.echo(f"{'=' * 40}", err=True)
 
-        if topic.kind == "file":
-            _run_file_topic(ctx, topic, model, abs_repo)
-        elif topic.kind == "function":
-            _run_function_topic(ctx, topic, model, abs_repo)
-        elif topic.kind == "repo":
-            _run_repo_topic(ctx, topic, model, abs_repo)
-        elif topic.kind == "diff":
-            _run_diff_topic(ctx, topic, model, abs_repo)
-        elif topic.kind == "general":
-            _run_general_topic(ctx, topic, model, abs_repo)
-        else:
-            click.echo(f"Unknown topic kind: {topic.kind}", err=True)
+            click.echo(f"Topic: [{topic.kind}] {topic.target}", err=True)
+            click.echo(f"  {topic.title}", err=True)
+            if topic.source:
+                click.echo(f"  (from {topic.source})", err=True)
+            click.echo(err=True)
+
+            if topic.kind == "file":
+                _run_file_topic(ctx, topic, model, abs_repo)
+            elif topic.kind == "function":
+                _run_function_topic(ctx, topic, model, abs_repo)
+            elif topic.kind == "repo":
+                _run_repo_topic(ctx, topic, model, abs_repo)
+            elif topic.kind == "diff":
+                _run_diff_topic(ctx, topic, model, abs_repo)
+            elif topic.kind == "general":
+                _run_general_topic(ctx, topic, model, abs_repo)
+            else:
+                click.echo(f"Unknown topic kind: {topic.kind}", err=True)
 
     remaining = pending_count(project_dir)
     if remaining:
@@ -793,70 +813,75 @@ def _explore_loop(ctx, project_dir, max_topics):
     abs_repo = os.path.abspath(repo_path)
     model = ctx.obj["model"]
     timeout = ctx.obj["timeout"]
+    parallel = ctx.obj["parallel"]
 
     explored = 0
     while explored < max_topics:
-        topic = pop_next(project_dir)
-        if topic is None:
+        batch_size = min(parallel, max_topics - explored)
+        batch = pop_batch(batch_size, project_dir)
+        if not batch:
             if explored == 0:
                 click.echo("No pending topics. Run `code-expert scan` to discover topics.")
             else:
                 click.echo(f"\nNo more topics after {explored} exploration(s).", err=True)
             return
 
-        explored += 1
         remaining = pending_count(project_dir)
         click.echo(f"\n{'=' * 40}", err=True)
-        click.echo(f"[{explored}/{max_topics}] ({remaining} remaining in queue)", err=True)
+        click.echo(f"[{explored + 1}-{explored + len(batch)}/{max_topics}] "
+                   f"({remaining} remaining in queue)", err=True)
         click.echo(f"{'=' * 40}", err=True)
-        click.echo(f"Topic: [{topic.kind}] {topic.target}", err=True)
-        click.echo(f"  {topic.title}", err=True)
-        if topic.source:
-            click.echo(f"  (from {topic.source})", err=True)
-        click.echo(err=True)
+        for topic in batch:
+            click.echo(f"  [{topic.kind}] {topic.target}", err=True)
 
-        if topic.kind == "file":
-            _run_file_topic(ctx, topic, model, abs_repo)
-        elif topic.kind == "function":
-            _run_function_topic(ctx, topic, model, abs_repo)
-        elif topic.kind == "repo":
-            _run_repo_topic(ctx, topic, model, abs_repo)
-        elif topic.kind == "diff":
-            _run_diff_topic(ctx, topic, model, abs_repo)
-        elif topic.kind == "general":
-            _run_general_topic(ctx, topic, model, abs_repo)
+        if parallel > 1 and len(batch) > 1:
+            results = asyncio.run(
+                _explore_topics_concurrent(batch, model, abs_repo, timeout, parallel)
+            )
+            for r in results:
+                if isinstance(r, Exception):
+                    click.echo(f"  Error: {r}", err=True)
+                elif r is not None:
+                    _, result, entry_name, entry_title, source = r
+                    _finalize_topic(ctx, entry_name, entry_title, source, result)
         else:
-            click.echo(f"Unknown topic kind: {topic.kind}", err=True)
+            topic = batch[0]
+            if topic.kind == "file":
+                _run_file_topic(ctx, topic, model, abs_repo)
+            elif topic.kind == "function":
+                _run_function_topic(ctx, topic, model, abs_repo)
+            elif topic.kind == "repo":
+                _run_repo_topic(ctx, topic, model, abs_repo)
+            elif topic.kind == "diff":
+                _run_diff_topic(ctx, topic, model, abs_repo)
+            elif topic.kind == "general":
+                _run_general_topic(ctx, topic, model, abs_repo)
+            else:
+                click.echo(f"Unknown topic kind: {topic.kind}", err=True)
+
+        explored += len(batch)
 
     remaining = pending_count(project_dir)
     click.echo(f"\nExplored {explored} topic(s). {remaining} remaining in queue.", err=True)
 
 
-def _run_file_topic(ctx, topic, model, repo_path):
-    """Handle a file exploration topic."""
-    timeout = ctx.obj["timeout"]
+def _prepare_file_topic(topic, repo_path):
+    """Prepare prompt for a file topic. Returns (prompt, entry_name, entry_title, source) or None."""
     file_path = topic.target
     abs_path = os.path.join(repo_path, file_path) if not os.path.isabs(file_path) else file_path
 
     if os.path.isdir(abs_path):
-        click.echo(f"{file_path} is a directory — exploring as repo topic.", err=True)
         topic.kind = "repo"
-        _run_repo_topic(ctx, topic, model, repo_path)
-        return
+        return _prepare_repo_topic(topic, repo_path)
 
     if not os.path.isfile(abs_path):
         click.echo(f"File not found: {file_path} (skipping)", err=True)
-        return
+        return None
 
-    if not check_model_available(model):
-        click.echo(f"Error: Model '{model}' CLI not available", err=True)
-        sys.exit(1)
-
-    click.echo(f"Reading {file_path}...", err=True)
     content = get_file_content(abs_path)
     if content is None:
         click.echo(f"Cannot read file: {file_path}", err=True)
-        return
+        return None
 
     rel_path = os.path.relpath(abs_path, repo_path)
     import_info = get_imports(abs_path, repo_path)
@@ -870,44 +895,27 @@ def _run_file_topic(ctx, topic, model, repo_path):
         repo_context=repo_tree,
     )
 
-    click.echo(f"Explaining {rel_path} with {model}...", err=True)
-    try:
-        result = asyncio.run(invoke(prompt, model, timeout=timeout))
-    except Exception as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
-
-    topic_name = _sanitize_path_for_filename(rel_path)
-    _create_entry(topic_name, f"File: {rel_path}", result)
-    _enqueue_topics(result, source=f"file:{rel_path}", project_dir=_get_project_dir(ctx))
-    _report_beliefs(result)
-
-    _emit(ctx, result)
+    entry_name = _sanitize_path_for_filename(rel_path)
+    return prompt, entry_name, f"File: {rel_path}", f"file:{rel_path}"
 
 
-def _run_function_topic(ctx, topic, model, repo_path):
-    """Handle a function exploration topic."""
-    timeout = ctx.obj["timeout"]
+def _prepare_function_topic(topic, repo_path):
+    """Prepare prompt for a function topic. Returns (prompt, entry_name, entry_title, source) or None."""
     if ":" not in topic.target:
         click.echo(f"Function topic must be file:symbol, got: {topic.target}", err=True)
-        return
+        return None
 
     file_path, symbol_name = topic.target.rsplit(":", 1)
     abs_path = os.path.join(repo_path, file_path) if not os.path.isabs(file_path) else file_path
 
     if not os.path.isfile(abs_path):
         click.echo(f"File not found: {file_path} (skipping)", err=True)
-        return
+        return None
 
-    if not check_model_available(model):
-        click.echo(f"Error: Model '{model}' CLI not available", err=True)
-        sys.exit(1)
-
-    click.echo(f"Reading {file_path}:{symbol_name}...", err=True)
     symbol_source = extract_symbol(abs_path, symbol_name)
     if symbol_source is None:
         click.echo(f"Symbol '{symbol_name}' not found in {file_path} (skipping)", err=True)
-        return
+        return None
 
     full_content = get_file_content(abs_path)
     related_tests = find_related_tests(abs_path, repo_path, symbol_name)
@@ -921,33 +929,16 @@ def _run_function_topic(ctx, topic, model, repo_path):
         related_tests=related_tests or None,
     )
 
-    click.echo(f"Explaining {rel_path}:{symbol_name} with {model}...", err=True)
-    try:
-        result = asyncio.run(invoke(prompt, model, timeout=timeout))
-    except Exception as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
-
-    topic_name = _sanitize_path_for_filename(rel_path) + f"-{symbol_name}"
-    _create_entry(topic_name, f"Function: {symbol_name} in {rel_path}", result)
-    _enqueue_topics(result, source=f"function:{rel_path}:{symbol_name}", project_dir=_get_project_dir(ctx))
-    _report_beliefs(result)
-
-    _emit(ctx, result)
+    entry_name = _sanitize_path_for_filename(rel_path) + f"-{symbol_name}"
+    return prompt, entry_name, f"Function: {symbol_name} in {rel_path}", f"function:{rel_path}:{symbol_name}"
 
 
-def _run_repo_topic(ctx, topic, model, repo_path):
-    """Handle a repo exploration topic."""
-    timeout = ctx.obj["timeout"]
+def _prepare_repo_topic(topic, repo_path):
+    """Prepare prompt for a repo topic. Returns (prompt, entry_name, entry_title, source) or None."""
     target_path = os.path.join(repo_path, topic.target) if topic.target != "." else repo_path
     if not os.path.isdir(target_path):
         target_path = repo_path
 
-    if not check_model_available(model):
-        click.echo(f"Error: Model '{model}' CLI not available", err=True)
-        sys.exit(1)
-
-    click.echo(f"Scanning repo structure...", err=True)
     tree = get_repo_structure(target_path)
     _, config_content = _find_project_config(target_path)
     readme_content = get_file_content(os.path.join(target_path, "README.md"))
@@ -960,36 +951,20 @@ def _run_repo_topic(ctx, topic, model, repo_path):
         entry_points=entry_points or None,
     )
 
-    click.echo(f"Explaining repo with {model}...", err=True)
-    try:
-        result = asyncio.run(invoke(prompt, model, timeout=timeout))
-    except Exception as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
-
-    _create_entry("repo-overview", "Repo Overview", result)
-    _enqueue_topics(result, source="repo-overview", project_dir=_get_project_dir(ctx))
-    _report_beliefs(result)
-
-    _emit(ctx, result)
+    return prompt, "repo-overview", "Repo Overview", "repo-overview"
 
 
-def _run_diff_topic(ctx, topic, model, repo_path):
-    """Handle a diff exploration topic."""
-    timeout = ctx.obj["timeout"]
-    if not check_model_available(model):
-        click.echo(f"Error: Model '{model}' CLI not available", err=True)
-        sys.exit(1)
-
+def _prepare_diff_topic(topic, repo_path):
+    """Prepare prompt for a diff topic. Returns (prompt, entry_name, entry_title, source) or None."""
     try:
         diff_content = get_diff(topic.target, cwd=repo_path)
     except RuntimeError as e:
         click.echo(f"Error getting diff: {e}", err=True)
-        return
+        return None
 
     if not diff_content.strip():
         click.echo("No changes to explain.", err=True)
-        return
+        return None
 
     commit_log = get_commit_log(topic.target, cwd=repo_path)
 
@@ -1006,58 +981,100 @@ def _run_diff_topic(ctx, topic, model, repo_path):
         changed_files_summary=changed_files or None,
     )
 
-    click.echo(f"Explaining diff {topic.target} ({len(changed_files)} files) with {model}...", err=True)
-    try:
-        result = asyncio.run(invoke(prompt, model, timeout=timeout))
-    except Exception as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
-
     safe_label = topic.target.replace("/", "-")
-    _create_entry(f"diff-{safe_label}", f"Diff: {topic.target}", result)
-    _enqueue_topics(result, source=f"diff:{topic.target}", project_dir=_get_project_dir(ctx))
-    _report_beliefs(result)
+    return prompt, f"diff-{safe_label}", f"Diff: {topic.target}", f"diff:{topic.target}"
 
+
+def _finalize_topic(ctx, entry_name, entry_title, source, result):
+    """Write entry, enqueue new topics, and report beliefs from a completed exploration."""
+    _create_entry(entry_name, entry_title, result)
+    _enqueue_topics(result, source=source, project_dir=_get_project_dir(ctx))
+    _report_beliefs(result)
     _emit(ctx, result)
 
 
-def _run_general_topic(ctx, topic, model, repo_path):
-    """Handle a general exploration topic using observe-then-explain."""
-    timeout = ctx.obj["timeout"]
-    if not check_model_available(model):
-        click.echo(f"Error: Model '{model}' CLI not available", err=True)
-        sys.exit(1)
+_PREPARE_DISPATCH = {
+    "file": _prepare_file_topic,
+    "function": _prepare_function_topic,
+    "repo": _prepare_repo_topic,
+    "diff": _prepare_diff_topic,
+}
 
+
+def _run_file_topic(ctx, topic, model, repo_path):
+    """Handle a file exploration topic."""
+    prepared = _prepare_file_topic(topic, repo_path)
+    if prepared is None:
+        return
+    prompt, entry_name, entry_title, source = prepared
+    click.echo(f"Explaining {topic.target} with {model}...", err=True)
+    try:
+        result = asyncio.run(invoke(prompt, model, timeout=ctx.obj["timeout"]))
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    _finalize_topic(ctx, entry_name, entry_title, source, result)
+
+
+def _run_function_topic(ctx, topic, model, repo_path):
+    """Handle a function exploration topic."""
+    prepared = _prepare_function_topic(topic, repo_path)
+    if prepared is None:
+        return
+    prompt, entry_name, entry_title, source = prepared
+    click.echo(f"Explaining {topic.target} with {model}...", err=True)
+    try:
+        result = asyncio.run(invoke(prompt, model, timeout=ctx.obj["timeout"]))
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    _finalize_topic(ctx, entry_name, entry_title, source, result)
+
+
+def _run_repo_topic(ctx, topic, model, repo_path):
+    """Handle a repo exploration topic."""
+    prepared = _prepare_repo_topic(topic, repo_path)
+    if prepared is None:
+        return
+    prompt, entry_name, entry_title, source = prepared
+    click.echo(f"Explaining repo with {model}...", err=True)
+    try:
+        result = asyncio.run(invoke(prompt, model, timeout=ctx.obj["timeout"]))
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    _finalize_topic(ctx, entry_name, entry_title, source, result)
+
+
+def _run_diff_topic(ctx, topic, model, repo_path):
+    """Handle a diff exploration topic."""
+    prepared = _prepare_diff_topic(topic, repo_path)
+    if prepared is None:
+        return
+    prompt, entry_name, entry_title, source = prepared
+    click.echo(f"Explaining diff {topic.target} with {model}...", err=True)
+    try:
+        result = asyncio.run(invoke(prompt, model, timeout=ctx.obj["timeout"]))
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    _finalize_topic(ctx, entry_name, entry_title, source, result)
+
+
+async def _run_general_topic_async(topic, model, repo_path, timeout):
+    """Run a general topic's full observe-then-explain pipeline asynchronously."""
     from .prompts.common import BELIEFS_INSTRUCTIONS, TOPICS_INSTRUCTIONS
 
-    # Phase 1: Observe
     tree = get_repo_structure(repo_path, max_depth=2)
     observe_prompt = build_observe_prompt(question=topic.title, tree=tree)
 
-    click.echo(f"Gathering observations with {model}...", err=True)
-    try:
-        observe_response = asyncio.run(invoke(observe_prompt, model))
-    except Exception as e:
-        click.echo(f"Error during observe: {e}", err=True)
-        sys.exit(1)
-
+    observe_response = await invoke(observe_prompt, model)
     requested_obs = parse_observation_requests(observe_response)
 
-    # Phase 2: Run observations
     obs_results = {}
     if requested_obs:
-        click.echo(f"Running {len(requested_obs)} observation(s):", err=True)
-        for obs in requested_obs:
-            click.echo(f"  - {obs.get('tool')}: {obs.get('name')}", err=True)
-        obs_results = asyncio.run(run_observations(requested_obs, repo_path))
+        obs_results = await run_observations(requested_obs, repo_path)
 
-        failed = [n for n, r in obs_results.items() if isinstance(r, dict) and "error" in r]
-        if failed:
-            click.echo(f"  ({len(failed)} failed)", err=True)
-    else:
-        click.echo("No observations requested.", err=True)
-
-    # Phase 3: Explain with targeted context
     explain_sections = [
         "You are a senior software engineer explaining a codebase to a new team member.",
         f"The reader wants to understand: **{topic.title}**",
@@ -1089,20 +1106,57 @@ def _run_general_topic(ctx, topic, model, repo_path):
     ])
 
     prompt = "\n".join(explain_sections)
+    result = await invoke(prompt, model, timeout=timeout)
 
-    click.echo(f"Explaining with {model}...", err=True)
+    safe_label = _sanitize_path_for_filename(topic.target)
+    return result, f"topic-{safe_label}", f"Topic: {topic.title}", f"general:{topic.target}"
+
+
+def _run_general_topic(ctx, topic, model, repo_path):
+    """Handle a general exploration topic using observe-then-explain."""
+    if not check_model_available(model):
+        click.echo(f"Error: Model '{model}' CLI not available", err=True)
+        sys.exit(1)
+
+    click.echo(f"Exploring '{topic.title}' with {model}...", err=True)
     try:
-        result = asyncio.run(invoke(prompt, model, timeout=timeout))
+        result, entry_name, entry_title, source = asyncio.run(
+            _run_general_topic_async(topic, model, repo_path, ctx.obj["timeout"])
+        )
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+    _finalize_topic(ctx, entry_name, entry_title, source, result)
 
-    safe_label = _sanitize_path_for_filename(topic.target)
-    _create_entry(f"topic-{safe_label}", f"Topic: {topic.title}", result)
-    _enqueue_topics(result, source=f"general:{topic.target}", project_dir=_get_project_dir(ctx))
-    _report_beliefs(result)
 
-    _emit(ctx, result)
+async def _explore_topics_concurrent(topics, model, repo_path, timeout, max_concurrent):
+    """Explore multiple topics concurrently. Returns list of (topic, result, entry_name, entry_title, source) or Exception."""
+    sem = asyncio.Semaphore(max_concurrent)
+
+    async def _do_topic(topic):
+        async with sem:
+            if topic.kind == "general":
+                result, entry_name, entry_title, source = await _run_general_topic_async(
+                    topic, model, repo_path, timeout,
+                )
+                return topic, result, entry_name, entry_title, source
+
+            prepare_fn = _PREPARE_DISPATCH.get(topic.kind)
+            if not prepare_fn:
+                raise ValueError(f"Unknown topic kind: {topic.kind}")
+
+            prepared = prepare_fn(topic, repo_path)
+            if prepared is None:
+                return None
+
+            prompt, entry_name, entry_title, source = prepared
+            result = await invoke(prompt, model, timeout=timeout)
+            return topic, result, entry_name, entry_title, source
+
+    return await asyncio.gather(
+        *[_do_topic(t) for t in topics],
+        return_exceptions=True,
+    )
 
 
 def _repo_path_to_entry_pattern(repo_path: str) -> str:
@@ -1408,22 +1462,26 @@ def propose_beliefs(ctx, batch_size, output, model, entry_paths, process_all, au
         batches.append("\n\n".join(current_batch))
         batch_paths.append(current_paths)
 
-    click.echo(f"Processing {len(batches)} batches (batch size: {batch_size})...")
+    parallel = ctx.obj["parallel"]
+    click.echo(f"Processing {len(batches)} batches (batch size: {batch_size}, parallel: {parallel})...")
 
-    all_proposals = []
+    prompts = []
     for i, batch_text in enumerate(batches):
-        click.echo(f"  Batch {i + 1}/{len(batches)}...")
         existing_context = _build_dedup_context(
             existing_beliefs, batch_paths[i], batch_text,
             belief_vectors=belief_vectors,
         )
-        prompt = PROPOSE_BELIEFS_CODE.format(entries=batch_text) + existing_context
-        try:
-            result = invoke_sync(prompt, model=model, timeout=timeout)
+        prompts.append(PROPOSE_BELIEFS_CODE.format(entries=batch_text) + existing_context)
+
+    results = invoke_concurrent_sync(prompts, model=model, timeout=timeout, max_concurrent=parallel)
+
+    all_proposals = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            click.echo(f"  ERROR in batch {i + 1}: {result}")
+        else:
+            click.echo(f"  Batch {i + 1}/{len(batches)} done")
             all_proposals.append(result)
-        except Exception as e:
-            click.echo(f"  ERROR: {e}")
-            continue
 
     # Filter out proposals whose IDs already exist
     filtered_proposals = []
@@ -1759,29 +1817,31 @@ def review_proposals(ctx, proposals_file, batch_size):
         click.echo("No proposals to review (all already rejected).", err=True)
         return
 
-    click.echo(f"Reviewing {len(to_review)} proposals ({already_rejected} already rejected)...", err=True)
+    parallel = ctx.obj["parallel"]
+    click.echo(f"Reviewing {len(to_review)} proposals ({already_rejected} already rejected, parallel: {parallel})...", err=True)
 
     existing_beliefs = _build_existing_beliefs_section(existing_nodes)
 
     all_decisions: dict[str, tuple[bool, str | None]] = {}
     batches = [to_review[i:i + batch_size] for i in range(0, len(to_review), batch_size)]
 
-    for i, batch in enumerate(batches):
-        click.echo(f"  Batch {i + 1}/{len(batches)} ({len(batch)} proposals)...", err=True)
-
+    prompts = []
+    for batch in batches:
         proposals_section = _build_proposals_section(batch)
-        prompt = REVIEW_PROMPT.format(
+        prompts.append(REVIEW_PROMPT.format(
             existing_beliefs=existing_beliefs,
             proposals=proposals_section,
-        )
+        ))
 
-        try:
-            result = invoke_sync(prompt, model=model, timeout=timeout)
+    results = invoke_concurrent_sync(prompts, model=model, timeout=timeout, max_concurrent=parallel)
+
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            click.echo(f"  ERROR in batch {i + 1}: {result}", err=True)
+        else:
+            click.echo(f"  Batch {i + 1}/{len(batches)} done", err=True)
             decisions = _parse_review_response(result)
             all_decisions.update(decisions)
-        except Exception as e:
-            click.echo(f"  ERROR in batch {i + 1}: {e}", err=True)
-            continue
 
     kept = 0
     rejected = 0
