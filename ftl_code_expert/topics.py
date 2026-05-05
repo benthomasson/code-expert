@@ -140,6 +140,19 @@ def pop_multiple(indices: list[int], project_dir: str | None = None) -> list[Top
     return results
 
 
+def pop_batch(n: int, project_dir: str | None = None) -> list[Topic]:
+    """Pop up to n pending topics and mark them as done."""
+    queue = load_queue(project_dir)
+    popped = []
+    for topic in queue:
+        if topic.status == "pending" and len(popped) < n:
+            topic.status = "done"
+            popped.append(topic)
+    if popped:
+        save_queue(queue, project_dir)
+    return popped
+
+
 def skip_topic(index: int, project_dir: str | None = None) -> bool:
     """Mark a topic as skipped by its index in the queue."""
     queue = load_queue(project_dir)
