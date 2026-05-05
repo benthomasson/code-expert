@@ -2905,6 +2905,46 @@ def _extract_source_file(entry_path: str, project_dir: str | None = None) -> str
     return None
 
 
+async def _gather_belief_context(
+    belief: dict,
+    nodes: dict,
+    repo_path: str,
+    project_dir: str | None = None,
+) -> tuple[str, str]:
+    """Gather code context for a single belief. Returns (id, context_text)."""
+    from .observations import grep, read_file
+
+    bid = belief["id"]
+    node = nodes.get(bid, {})
+    source = node.get("source", "")
+
+    parts: list[str] = []
+
+    src_file = _extract_source_file(source, project_dir)
+    if src_file:
+        result = await read_file(src_file, repo_path, max_lines=300)
+        if "content" in result:
+            content = result["content"]
+            if len(content) > 4000:
+                content = content[:4000] + "\n... (truncated)"
+            parts.append(f"### {src_file}\n```\n{content}\n```")
+
+    terms = [t for t in bid.replace("-", " ").split() if len(t) > 3][:3]
+    grep_tasks = [grep(term, repo_path, glob="*", max_results=5) for term in terms]
+    grep_results = await asyncio.gather(*grep_tasks, return_exceptions=True)
+    for term, result in zip(terms, grep_results):
+        if isinstance(result, Exception):
+            continue
+        if result.get("matches"):
+            matches_text = "\n".join(
+                f"  {m['file']}:{m['line']}: {m['text']}"
+                for m in result["matches"][:5]
+            )
+            parts.append(f"### grep '{term}'\n{matches_text}")
+
+    return bid, "\n\n".join(parts) if parts else "(no code context found)"
+
+
 async def _gather_confirmation_context(
     beliefs: list[dict],
     nodes: dict,
@@ -2912,37 +2952,17 @@ async def _gather_confirmation_context(
     project_dir: str | None = None,
 ) -> dict[str, str]:
     """Gather code context for confirming whether beliefs still hold."""
-    from .observations import grep, read_file
-
+    tasks = [
+        _gather_belief_context(b, nodes, repo_path, project_dir)
+        for b in beliefs
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
     contexts: dict[str, str] = {}
-    for belief in beliefs:
-        bid = belief["id"]
-        node = nodes.get(bid, {})
-        source = node.get("source", "")
-
-        parts: list[str] = []
-
-        src_file = _extract_source_file(source, project_dir)
-        if src_file:
-            result = await read_file(src_file, repo_path, max_lines=300)
-            if "content" in result:
-                content = result["content"]
-                if len(content) > 4000:
-                    content = content[:4000] + "\n... (truncated)"
-                parts.append(f"### {src_file}\n```\n{content}\n```")
-
-        terms = [t for t in bid.replace("-", " ").split() if len(t) > 3][:3]
-        for term in terms:
-            result = await grep(term, repo_path, max_results=5)
-            if result.get("matches"):
-                matches_text = "\n".join(
-                    f"  {m['file']}:{m['line']}: {m['text']}"
-                    for m in result["matches"][:5]
-                )
-                parts.append(f"### grep '{term}'\n{matches_text}")
-
-        contexts[bid] = "\n\n".join(parts) if parts else "(no code context found)"
-
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            contexts[beliefs[i]["id"]] = "(error gathering context)"
+        else:
+            contexts[result[0]] = result[1]
     return contexts
 
 
@@ -3141,8 +3161,8 @@ def file_issues(ctx, repo_slug, platform_override, labels, dry_run, skip_confirm
 
     remaining = [c for c in candidates if c["id"] not in existing]
 
-    # Confirm issues still exist in code
-    if not skip_confirm and remaining and check_model_available(model):
+    # Confirm issues still exist in code (skip during dry-run to avoid LLM costs)
+    if not dry_run and not skip_confirm and remaining and check_model_available(model):
         click.echo(f"Confirming {len(remaining)} candidate(s) against current code...", err=True)
         confirmed = _confirm_beliefs(
             remaining, nodes, target_repo_path,
