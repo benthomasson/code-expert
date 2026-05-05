@@ -87,7 +87,8 @@ derive            Compute logical consequences across the belief network
 generate-summary  Morning report: new gated OUT, new negative IN, critical watch list
   │
   ▼
-file-issues       OUT gated beliefs → GitHub/GitLab issues automatically
+file-issues       Gated blockers + negative beliefs → GitHub/GitLab issues
+                    (confirms each issue still exists in code before filing)
 
 update            Runs the full pipeline above in one command (--since-last)
 ```
@@ -243,19 +244,25 @@ Without `--auto`, proposals are written to `proposed-derivations.md` for review.
 
 ### `code-expert file-issues`
 
-File GitHub or GitLab issues from gated beliefs with active blockers. Detects the platform from the target repository's git remote.
+File GitHub or GitLab issues from gated beliefs with active blockers and negative IN beliefs (bugs, gaps, risks). Detects the platform from the target repository's git remote. Before filing, each candidate is confirmed against the current code using LLM verification to avoid filing stale issues.
 
 ```bash
 code-expert file-issues              # auto-detect repo, file issues
 code-expert file-issues --dry-run    # preview without filing
+code-expert file-issues --skip-confirm  # skip code confirmation
+code-expert file-issues --no-negative   # only gated blockers
 code-expert file-issues --repo owner/repo --label bug
 code-expert file-issues --platform gitlab --repo group/project
 ```
 
-For each GATE belief where the outlist node is IN (blocking the positive conclusion):
+Files issues from two sources:
+- **Gated blockers**: GATE beliefs where the outlist node is IN (blocking the positive conclusion). Labeled `reasons-gate`.
+- **Negative beliefs**: IN beliefs classified as bugs, gaps, or risks (via `reasons list-negative` when available, falls back to keyword detection). Labeled `reasons-negative`.
+
+For each candidate:
 - Checks for existing issues to avoid duplicates (fuzzy title matching)
-- Creates an issue with the blocker's description, impact (which beliefs it blocks), and resolution instructions
-- Adds the `reasons-gate` label automatically
+- Confirms the issue still exists in the current code (unless `--skip-confirm`)
+- Creates an issue with description and resolution instructions (including `reasons retract` command)
 
 Requires `gh` (GitHub) or `glab` (GitLab) CLI to be installed and authenticated.
 
