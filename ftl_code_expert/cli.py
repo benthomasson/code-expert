@@ -2818,6 +2818,26 @@ def _build_issue_body(blocker_node: dict, gated_nodes: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _build_negative_issue_body(belief: dict) -> str:
+    """Build issue body for a negative IN belief."""
+    lines = [
+        "## Problem",
+        "",
+        belief["text"],
+        "",
+        "## Resolution",
+        "",
+        "When this issue is resolved, retract the belief:",
+        "```bash",
+        f"reasons retract {belief['id']} --reason \"Fixed in <PR/commit>\"",
+        "```",
+        "",
+        "---",
+        "*Filed automatically from reasons network by `code-expert file-issues`*",
+    ]
+    return "\n".join(lines)
+
+
 def _create_issue(platform: str, repo_slug: str, title: str, body: str,
                   labels: list[str]) -> str | None:
     """Create an issue and return its URL, or None on failure."""
@@ -2848,6 +2868,144 @@ def _create_issue(platform: str, repo_slug: str, title: str, body: str,
     return None
 
 
+# --- confirmation ---
+
+CONFIRM_PROMPT = """\
+You are verifying whether reported issues still exist in a codebase.
+
+For each issue below, I provide the issue description and relevant code context
+gathered from the current state of the repository.
+
+Determine whether each issue STILL EXISTS in the current code.
+
+An issue still exists if the code shows the described problem, gap, or risk.
+An issue is resolved if the code has been fixed, the relevant code was removed,
+or the concern no longer applies.
+
+Return ONLY a JSON object mapping each belief ID to true (still exists) or false (resolved).
+Example: {{"belief-1": true, "belief-2": false}}
+
+## Issues to Verify
+
+{issues}"""
+
+
+def _extract_source_file(entry_path: str, project_dir: str | None = None) -> str | None:
+    """Extract source file path from an entry's header line (# File: ...)."""
+    base = project_dir or "."
+    full_path = Path(base) / entry_path
+    if not full_path.is_file():
+        return None
+    try:
+        for line in full_path.read_text().splitlines()[:5]:
+            if line.startswith("# File: "):
+                return line[8:].strip()
+    except OSError:
+        pass
+    return None
+
+
+async def _gather_confirmation_context(
+    beliefs: list[dict],
+    nodes: dict,
+    repo_path: str,
+    project_dir: str | None = None,
+) -> dict[str, str]:
+    """Gather code context for confirming whether beliefs still hold."""
+    from .observations import grep, read_file
+
+    contexts: dict[str, str] = {}
+    for belief in beliefs:
+        bid = belief["id"]
+        node = nodes.get(bid, {})
+        source = node.get("source", "")
+
+        parts: list[str] = []
+
+        src_file = _extract_source_file(source, project_dir)
+        if src_file:
+            result = await read_file(src_file, repo_path, max_lines=300)
+            if "content" in result:
+                content = result["content"]
+                if len(content) > 4000:
+                    content = content[:4000] + "\n... (truncated)"
+                parts.append(f"### {src_file}\n```\n{content}\n```")
+
+        terms = [t for t in bid.replace("-", " ").split() if len(t) > 3][:3]
+        for term in terms:
+            result = await grep(term, repo_path, max_results=5)
+            if result.get("matches"):
+                matches_text = "\n".join(
+                    f"  {m['file']}:{m['line']}: {m['text']}"
+                    for m in result["matches"][:5]
+                )
+                parts.append(f"### grep '{term}'\n{matches_text}")
+
+        contexts[bid] = "\n\n".join(parts) if parts else "(no code context found)"
+
+    return contexts
+
+
+def _parse_confirmation(response: str) -> dict[str, bool]:
+    """Parse JSON confirmation response from LLM."""
+    m = re.search(r"\{[^{}]*\}", response, re.DOTALL)
+    if m:
+        try:
+            data = json.loads(m.group(0))
+            return {k: bool(v) for k, v in data.items()}
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return {}
+
+
+def _confirm_beliefs(
+    beliefs: list[dict],
+    nodes: dict,
+    repo_path: str,
+    model: str,
+    timeout: int,
+    project_dir: str | None = None,
+    batch_size: int = 10,
+) -> list[dict]:
+    """Confirm beliefs still exist in code using LLM. Returns confirmed beliefs."""
+    confirmed = []
+
+    batches = [beliefs[i:i + batch_size] for i in range(0, len(beliefs), batch_size)]
+    for i, batch in enumerate(batches):
+        click.echo(
+            f"  Confirming batch {i + 1}/{len(batches)} ({len(batch)} beliefs)...",
+            err=True,
+        )
+
+        contexts = asyncio.run(
+            _gather_confirmation_context(batch, nodes, repo_path, project_dir)
+        )
+
+        issues_section = []
+        for belief in batch:
+            ctx_text = contexts.get(belief["id"], "(no context)")
+            issues_section.append(
+                f"### `{belief['id']}`\n{belief['text']}\n\n"
+                f"**Code context:**\n{ctx_text}"
+            )
+
+        prompt = CONFIRM_PROMPT.format(issues="\n\n---\n\n".join(issues_section))
+
+        try:
+            response = invoke_sync(prompt, model=model, timeout=timeout)
+            decisions = _parse_confirmation(response)
+            for belief in batch:
+                if decisions.get(belief["id"], True):
+                    confirmed.append(belief)
+                else:
+                    click.echo(f"    {belief['id']}: resolved (skipping)", err=True)
+        except Exception as e:
+            click.echo(f"    Confirmation failed ({e}), including all in batch", err=True)
+            confirmed.extend(batch)
+
+    return confirmed
+
+
 @cli.command("file-issues")
 @click.option("--repo", "-r", "repo_slug", default=None,
               help="Target repo (owner/repo). Auto-detected from git remote if omitted.")
@@ -2858,23 +3016,32 @@ def _create_issue(platform: str, repo_slug: str, title: str, body: str,
               help="Extra labels to add (repeatable)")
 @click.option("--dry-run", is_flag=True, default=False,
               help="Show what would be filed without creating issues")
+@click.option("--skip-confirm", is_flag=True, default=False,
+              help="Skip LLM confirmation that issues still exist in code")
+@click.option("--no-negative", is_flag=True, default=False,
+              help="Skip negative IN beliefs (only file gated blockers)")
 @click.pass_context
-def file_issues(ctx, repo_slug, platform_override, labels, dry_run):
-    """File issues from gated beliefs that have active blockers.
+def file_issues(ctx, repo_slug, platform_override, labels, dry_run, skip_confirm, no_negative):
+    """File issues from gated blockers and negative beliefs.
 
     Finds GATE beliefs where outlist nodes are IN (blocking the conclusion),
-    and creates issues for each blocker in the target repository.
+    plus negative IN beliefs (bugs, gaps, risks). Before filing, confirms
+    each issue still exists in the current code using LLM verification.
 
     Checks for existing issues to avoid duplicates.
 
     Example:
         code-expert file-issues              # auto-detect repo, file issues
         code-expert file-issues --dry-run    # preview without filing
-        code-expert file-issues --repo owner/repo --label bug
+        code-expert file-issues --skip-confirm  # skip code confirmation
+        code-expert file-issues --no-negative   # only gated blockers
     """
     if not _has_reasons():
         click.echo("Error: reasons CLI required. Install with: uv tool install ftl-reasons", err=True)
         sys.exit(1)
+
+    model = ctx.obj["model"]
+    timeout = ctx.obj["timeout"]
 
     # Load network
     network = _load_network()
@@ -2883,14 +3050,16 @@ def file_issues(ctx, repo_slug, platform_override, labels, dry_run):
         click.echo("No beliefs found. Run explorations first.", err=True)
         sys.exit(1)
 
-    # Find gated nodes with active blockers
-    # blocker_id -> list of gated node dicts
+    # Build unified candidate list: [{id, text, type, gated?}]
+    candidates: list[dict] = []
+
+    # 1. Find gated blockers
     blockers: dict[str, list[dict]] = {}
     for nid, node in nodes.items():
         if node.get("truth_value") != "OUT":
-            continue  # Only OUT nodes are actually gated
+            continue
         if node.get("metadata", {}).get("superseded_by"):
-            continue  # Superseded beliefs are OUT by design, not bugs
+            continue
         for j in node.get("justifications", []):
             if not j.get("outlist"):
                 continue
@@ -2899,21 +3068,46 @@ def file_issues(ctx, repo_slug, platform_override, labels, dry_run):
                     continue
                 if nodes[outlist_id].get("truth_value") != "IN":
                     continue
-                # This outlist node is IN, blocking an OUT derived belief
                 blockers.setdefault(outlist_id, []).append({
                     "id": nid,
                     "text": node.get("text", ""),
                 })
 
-    if not blockers:
-        click.echo("No active blockers found. All gated beliefs are satisfied.")
+    for bid, gated in blockers.items():
+        candidates.append({
+            "id": bid,
+            "text": nodes[bid].get("text", ""),
+            "type": "gate",
+            "gated": gated,
+        })
+
+    # 2. Find negative IN beliefs
+    if not no_negative:
+        negative = _get_negative_beliefs(nodes, model=model)
+        gate_ids = set(blockers.keys())
+        for belief in negative:
+            if belief["id"] not in gate_ids:
+                candidates.append({
+                    "id": belief["id"],
+                    "text": belief["text"],
+                    "type": "negative",
+                })
+
+    if not candidates:
+        click.echo("No active blockers or negative beliefs found.")
         return
 
-    click.echo(f"Found {len(blockers)} active blocker(s) gating {sum(len(v) for v in blockers.values())} belief(s)", err=True)
+    gate_count = sum(1 for c in candidates if c["type"] == "gate")
+    neg_count = sum(1 for c in candidates if c["type"] == "negative")
+    click.echo(
+        f"Found {gate_count} gated blocker(s) and {neg_count} negative belief(s)",
+        err=True,
+    )
 
     # Detect platform
     config = _load_config()
     target_repo_path = config.get("repo_path", os.getcwd()) if config else os.getcwd()
+    project_dir = config.get("project_dir") if config else None
 
     platform = platform_override
     if not repo_slug or not platform:
@@ -2934,55 +3128,72 @@ def file_issues(ctx, repo_slug, platform_override, labels, dry_run):
 
     click.echo(f"Platform: {platform}, Repo: {repo_slug}", err=True)
 
-    # Check for existing issues
-    blocker_ids = list(blockers.keys())
-    blocker_texts = {bid: nodes[bid].get("text", "") for bid in blocker_ids}
+    # Dedup against existing issues
+    all_ids = [c["id"] for c in candidates]
+    all_texts = {c["id"]: c["text"] for c in candidates}
     if not dry_run:
         click.echo("Checking for existing issues...", err=True)
-        existing = _find_existing_issues(platform, repo_slug, blocker_ids, blocker_texts)
+        existing = _find_existing_issues(platform, repo_slug, all_ids, all_texts)
         if existing:
             click.echo(f"  {len(existing)} already have issues: {', '.join(sorted(existing))}", err=True)
     else:
         existing = set()
 
-    # File issues
-    all_labels = ["reasons-gate"] + list(labels)
-    filed = []
-    skipped = []
+    remaining = [c for c in candidates if c["id"] not in existing]
 
-    for blocker_id in sorted(blocker_ids):
-        blocker_node = nodes[blocker_id]
-        gated = blockers[blocker_id]
-        title = f"[{blocker_id}] {blocker_node.get('text', '')[:80]}"
-        body = _build_issue_body(
-            {"id": blocker_id, "text": blocker_node.get("text", "")},
-            gated,
+    # Confirm issues still exist in code
+    if not skip_confirm and remaining and check_model_available(model):
+        click.echo(f"Confirming {len(remaining)} candidate(s) against current code...", err=True)
+        confirmed = _confirm_beliefs(
+            remaining, nodes, target_repo_path,
+            model=model, timeout=timeout, project_dir=project_dir,
         )
+        unconfirmed = len(remaining) - len(confirmed)
+        if unconfirmed:
+            click.echo(f"  {unconfirmed} belief(s) no longer present in code", err=True)
+        remaining = confirmed
 
-        if blocker_id in existing:
-            skipped.append(blocker_id)
-            click.echo(f"  SKIP {blocker_id} (issue already exists)")
-            continue
+    # File issues
+    filed = []
+    skipped_ids = list(existing)
+
+    for candidate in sorted(remaining, key=lambda c: c["id"]):
+        ctype = candidate["type"]
+        issue_labels = [f"reasons-{ctype}"] + list(labels)
+        title = f"[{candidate['id']}] {candidate['text'][:80]}"
+
+        if ctype == "gate":
+            body = _build_issue_body(
+                {"id": candidate["id"], "text": candidate["text"]},
+                candidate["gated"],
+            )
+        else:
+            body = _build_negative_issue_body(candidate)
 
         if dry_run:
-            click.echo(f"\n  WOULD FILE: {title}")
-            click.echo(f"  Blocks: {', '.join(g['id'] for g in gated)}")
-            click.echo(f"  Labels: {', '.join(all_labels)}")
+            click.echo(f"\n  WOULD FILE ({ctype}): {title}")
+            if ctype == "gate":
+                click.echo(f"  Blocks: {', '.join(g['id'] for g in candidate['gated'])}")
+            click.echo(f"  Labels: {', '.join(issue_labels)}")
             continue
 
-        click.echo(f"  Filing: {blocker_id}...", err=True)
-        url = _create_issue(platform, repo_slug, title, body, all_labels)
+        click.echo(f"  Filing: {candidate['id']}...", err=True)
+        url = _create_issue(platform, repo_slug, title, body, issue_labels)
         if url:
-            filed.append((blocker_id, url))
-            click.echo(f"  OK {blocker_id}: {url}")
+            filed.append((candidate["id"], url))
+            click.echo(f"  OK {candidate['id']}: {url}")
         else:
-            click.echo(f"  FAIL {blocker_id}")
+            click.echo(f"  FAIL {candidate['id']}")
 
     # Summary
     if dry_run:
-        click.echo(f"\nDry run: {len(blocker_ids) - len(existing)} would be filed, {len(existing)} already exist")
+        click.echo(
+            f"\nDry run: {len(remaining)} would be filed, "
+            f"{len(existing)} already exist, "
+            f"{len(candidates) - len(remaining) - len(existing)} filtered"
+        )
     else:
-        click.echo(f"\nFiled {len(filed)} issue(s), skipped {len(skipped)}")
+        click.echo(f"\nFiled {len(filed)} issue(s), skipped {len(skipped_ids)}")
         for bid, url in filed:
             click.echo(f"  {bid}: {url}")
 
@@ -3049,6 +3260,23 @@ def _find_negative_in_beliefs(nodes: dict) -> list[dict]:
         if _NEGATIVE_KEYWORDS.search(text) and not _POSITIVE_CONTEXT.search(text):
             results.append({"id": nid, "text": text})
     return results
+
+
+def _get_negative_beliefs(nodes: dict, model: str = "claude") -> list[dict]:
+    """Get negative IN beliefs, preferring reasons list-negative when available."""
+    if _has_reasons():
+        result = subprocess.run(
+            ["reasons", "list-negative", "-m", model],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            beliefs = []
+            for line in result.stdout.splitlines():
+                m = re.match(r"\s*\[-\]\s+([\w-]+):\s+(.+)", line)
+                if m:
+                    beliefs.append({"id": m.group(1), "text": m.group(2)})
+            return beliefs
+    return _find_negative_in_beliefs(nodes)
 
 
 def _format_gated_section(beliefs: list[dict]) -> str:

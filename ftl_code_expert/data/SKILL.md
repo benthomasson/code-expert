@@ -53,7 +53,7 @@ code-expert update --since-last            # full pipeline + morning summary
 - `derive [--auto] [--exhaust] [--dry-run]` — Propose deeper reasoning chains (`--exhaust` loops until no new derivations; delegates to `reasons derive`)
 - `generate-summary` — Morning summary entry: new gated OUT beliefs, new negative IN beliefs, critical watch list
 - `update --since-last|--since DATE [--file-issues]` — Full automated pipeline: walk-commits → propose-beliefs → review-proposals → accept-beliefs → derive --exhaust → generate-summary
-- `file-issues [--dry-run] [--repo OWNER/REPO] [--label L]` — File issues from gated beliefs with active blockers (GitHub/GitLab)
+- `file-issues [--dry-run] [--repo OWNER/REPO] [--label L] [--skip-confirm] [--no-negative]` — File issues from gated blockers and negative beliefs; confirms issues still exist in code before filing (GitHub/GitLab)
 - `status` — Dashboard (shows reasons.db stats if available)
 
 ## Natural Language
@@ -67,6 +67,7 @@ If the user says:
 - "build deeper chains" / "derive conclusions" → `code-expert derive`
 - "derive everything" / "exhaust derivations" → `code-expert derive --exhaust`
 - "file issues for blockers" / "what's blocking features" → `code-expert file-issues --dry-run`
+- "file issues for bugs" / "what negative findings do we have" → `code-expert file-issues --dry-run`
 - "walk through recent commits" / "explore what changed this week" → `code-expert walk-commits --since "1 week ago"`
 - "catch up on changes" / "nightly update" / "update the knowledge base" → `code-expert update --since-last`
 - "morning summary" / "what's the status" → `code-expert generate-summary`
