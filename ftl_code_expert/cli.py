@@ -759,6 +759,10 @@ def explore(ctx, do_skip, pick_index, loop_max):
     timeout = ctx.obj["timeout"]
     parallel = ctx.obj["parallel"]
 
+    if not check_model_available(model):
+        click.echo(f"Error: Model '{model}' CLI not available", err=True)
+        sys.exit(1)
+
     topics_only = [topic for _, topic in valid_topics]
     for seq, (_, topic) in enumerate(valid_topics):
         click.echo(f"  [{seq + 1}/{len(valid_topics)}] [{topic.kind}] {topic.target}", err=True)
@@ -814,6 +818,10 @@ def _explore_loop(ctx, project_dir, max_topics):
     model = ctx.obj["model"]
     timeout = ctx.obj["timeout"]
     parallel = ctx.obj["parallel"]
+
+    if not check_model_available(model):
+        click.echo(f"Error: Model '{model}' CLI not available", err=True)
+        sys.exit(1)
 
     explored = 0
     while explored < max_topics:
@@ -1114,10 +1122,6 @@ async def _run_general_topic_async(topic, model, repo_path, timeout):
 
 def _run_general_topic(ctx, topic, model, repo_path):
     """Handle a general exploration topic using observe-then-explain."""
-    if not check_model_available(model):
-        click.echo(f"Error: Model '{model}' CLI not available", err=True)
-        sys.exit(1)
-
     click.echo(f"Exploring '{topic.title}' with {model}...", err=True)
     try:
         result, entry_name, entry_title, source = asyncio.run(
@@ -1135,6 +1139,7 @@ async def _explore_topics_concurrent(topics, model, repo_path, timeout, max_conc
 
     async def _do_topic(topic):
         async with sem:
+            click.echo(f"Explaining [{topic.kind}] {topic.target} with {model}...", err=True)
             if topic.kind == "general":
                 result, entry_name, entry_title, source = await _run_general_topic_async(
                     topic, model, repo_path, timeout,
